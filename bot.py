@@ -56,7 +56,7 @@ def get_file_from_bale(file_id):
 
 def analyze_prescription_with_vision(image_bytes, specialty, org, age):
     if not OPENAI_API_KEY:
-        return "❌ خطای سیستمی: کلید تنظیمات موتور بینایی (OPENAI_API_KEY) در سرور Render تنظیم نشده است."
+        return "❌ خطای تنظیمات: کلید OPENAI_API_KEY در متغیرهای محیطی سرور Render تعریف نشده است. لطفاً آن را اضافه کنید."
 
     try:
         base64_image = base64.b64encode(image_bytes).decode('utf-8')
@@ -68,9 +68,9 @@ def analyze_prescription_with_vision(image_bytes, specialty, org, age):
         prompt_text = (
             f"تو یک داروساز و کارشناس ارشد بیمه درمان البرز هستی. این تصویر یک پیش‌فاکتور یا نسخه دارویی است. "
             f"تخصص پزشک تجویزکننده '{specialty}' است و سن بیمار {age} سال و سازمان بیمه‌شده '{org}' است. "
-            f"1. متن و اقلام دارویی، مکمل‌ها و ویتامین‌های موجود در تصویر را با دقت کامل و واقعی استخراج کن (مراقب خوانش کلمات پزشکی باش). "
+            f"1. اقلام دارویی، مکمل‌ها و اقلام درج شده در تصویر را با دقت کامل و واقعی استخراج کن (تک‌تک اقلام مانند آمپول‌ها، سرنگ‌ها یا داروها را بخوان). "
             f"2. بر اساس ضوابط بیمه البرز بررسی کن آیا تجویز هر قلم با تخصص پزشک ('{specialty}') همخوانی دارد یا خیر؟ "
-            f"(مثلاً اگر تخصص عمومی است، مکمل‌ها و داروهای تخصصی نیاز به متخصص دارند و رد می‌شوند، اما ویتامین C و D معاف از تخصص هستند). "
+            f"(مثلاً اگر تخصص عمومی است، مکمل‌ها و اقلام تخصصی نیاز به متخصص دارند و رد می‌شوند، اما ویتامین C و D معاف هستند). "
             f"3. نتیجه را به صورت خوانا، تفکیک‌شده با علامت‌های تایید (✅) و خطا (❌) همراه با دلیل به زبان فارسی برای متصدی داروخانه بنویس."
         )
 
@@ -90,7 +90,7 @@ def analyze_prescription_with_vision(image_bytes, specialty, org, age):
                     ]
                 }
             ],
-            "max_tokens": 1000
+            "max_tokens": 800
         }
 
         response = requests.post("https://api.openai.com/v1/chat/completions", headers=headers, json=payload, timeout=30)
@@ -99,7 +99,7 @@ def analyze_prescription_with_vision(image_bytes, specialty, org, age):
         if "choices" in res_json:
             return res_json["choices"][0]["message"]["content"]
         else:
-            return "❌ خطا در پاسخ‌دهی موتور هوش مصنوعی."
+            return f"❌ خطا در پاسخ موتور هوش مصنوعی: {res_json}"
     except Exception as e:
         return f"❌ خطا در اتصال به موتور بینایی: {str(e)}"
 
@@ -155,15 +155,14 @@ def webhook():
     elif step == "GET_EXPIRY":
         update_user(chat_id, "expiry", text)
         update_user(chat_id, "step", "GET_SPECIALTY")
-        send_message(chat_id, "تخصص پزشک تجویزکننده را به صورت کامل بنویسید:\n(مثلاً: **عمومی**، **متخصص قلب و عروق**، **متخصص داخلی** و...)")
+        send_message(chat_id, "تخصص پزشک تجویزکننده را به صورت کامل مشخص کنید:\n(باید نام تخصص یا عبارت **عمومی** را به طور کامل بنویسید)")
 
     elif step == "GET_SPECIALTY":
-        # اعتبارسنجی سخت‌گیرانه برای جلوگیری از عبور با کلمات ناقص مثل "متخصص تنها" یا "قب"
         clean_text = text.lower().strip()
-        invalid_words = ["متخصص تنها", "متخصص", "تخصص", "ندارد", "پ", "قب", "الف", "ب"]
+        invalid_words = ["متخصص تنها", "متخصص", "تخصص", "ندارد", "پ", "قب", "ص", "بررسی", "جهت", "در"]
         
-        if len(text) < 3 or clean_text in invalid_words:
-            send_message(chat_id, "❌ تخصص وارد شده نامعتبر، ناقص یا مبهم است!\nلطفاً نوع تخصص را کامل و دقیق بنویسید (مثلاً: **پزشک عمومی** یا **متخصص اطفال**):")
+        if len(clean_text) < 3 or clean_text in invalid_words or clean_text == "متخصص":
+            send_message(chat_id, "❌ تخصص وارد شده نامعتبر، ناقص یا مبهم است!\nلطفاً نوع تخصص را به طور کامل و صحیح بنویسید (مثلاً: **پزشک عمومی**، **متخصص قلب و عروق**):")
             return "OK", 200
 
         update_user(chat_id, "specialty", text)
@@ -180,7 +179,7 @@ def webhook():
             age = current_user[4] if current_user[4] else "نامشخص"
             spec = current_user[6] if current_user[6] else "عمومی"
             
-            send_message(chat_id, "⏳ تصویر دریافت شد. در حال تحلیل دقیق اقلام توسط موتور بینایی هوش مصنوعی...")
+            send_message(chat_id, "⏳ تصویر دریافت شد. در حال ارسال به موتور بینایی هوش مصنوعی و تطبیق با ضوابط بیمه البرز...")
             
             file_id = photo_list[-1]['file_id'] if photo_list else document['file_id']
             image_bytes = get_file_from_bale(file_id)
@@ -193,4 +192,22 @@ def webhook():
                 final_output += "----------------------------------------\n"
                 final_output += analysis_result
                 final_output += "\n----------------------------------------\n"
-                final_output += "🔄 برای بررسی نسخه جدید، دستور زیر را
+                final_output += "🔄 برای بررسی نسخه جدید، دستور زیر را ارسال کنید:\n/start"
+                
+                send_message(chat_id, final_output)
+            else:
+                send_message(chat_id, "❌ خطا در دانلود تصویر از سرور پیام‌رسان. لطفاً مجدداً ارسال کنید.")
+            
+            # ریست کردن کامل وضعیت برای نسخه بعدی
+            conn = sqlite3.connect(DB_PATH)
+            conn.execute("UPDATE users SET step='START', pharma=NULL, org=NULL, age=NULL, expiry=NULL, specialty=NULL WHERE chat_id=?", (chat_id,))
+            conn.commit()
+            conn.close()
+        else:
+            send_message(chat_id, "❌ لطفاً فقط تصویر یا فایل نسخه را ارسال کنید.")
+
+    return "OK", 200
+
+init_db()
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=10000)
