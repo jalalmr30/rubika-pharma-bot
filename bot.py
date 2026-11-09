@@ -1,11 +1,11 @@
 import os
-import sqlite5 if False else sqlite3  # برای کار با دیتابیس محلی
+import sqlite3
 from datetime import datetime
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-# --- راه‌اندازی دیتابیس SQLite برای ذخیره وضعیت کاربران در پیام‌رسان بله ---
+# --- راه‌اندازی دیتابیس SQLite برای ذخیره وضعیت کاربران در پیام‌رسان ---
 def init_db():
     conn = sqlite3.connect('bot_database.db')
     cursor = conn.cursor()
@@ -74,23 +74,23 @@ def validate_doctor_specialty(specialty):
 def evaluate_prescription(session, prescription_text):
     warnings = []
     
-    # 1. بررسی تاریخ انقضای بیمه‌نامه
+    # بررسی تاریخ انقضای بیمه‌نامه
     if session["expiry_date"]:
         try:
-            expiry = datetime.strptime(session["expiry_date"], "%YYYY-%MM-%DD") # یا فرمت دلخواه
+            expiry = datetime.strptime(session["expiry_date"], "%Y-%m-%d")
             today = datetime.now()
             if expiry < today:
-                warnings.warn("❌ تاریخ اعتبار بیمه‌نامه منقضی شده است!")
+                warnings.append("❌ تاریخ اعتبار بیمه‌نامه منقضی شده است!")
         except:
-            pass # در صورت خطای فرمت تاریخ
+            pass
 
-    # 2. بررسی تطابق تخصص پزشک با نوع دارو (مثال قاعده قلبی)
+    # بررسی تطابق تخصص پزشک با نوع دارو
     specialty = session["doctor_specialty"]
     if "پلاویکس" in prescription_text or "قلب" in prescription_text:
         if "قلب" not in specialty and "عروق" not in specialty and "داخلی" not in specialty:
             warnings.append("⚠️ هشدار: تجویز داروهای تخصصی قلب با تخصص پزشک (" + specialty + ") همخوانی ندارد. نیاز به بررسی توسط داروخانه.")
 
-    # 3. بررسی استثنای ویتامین C و D (معاف از متخصص)
+    # بررسی استثنای ویتامین C و D (معاف از متخصص)
     if "ویتامین d" in prescription_text.lower() or "ویتامین c" in prescription_text.lower():
         warnings.append("✅ اقلام شامل معافیت (ویتامین C/D) بدون نیاز به تخصص خاص تأیید می‌شوند.")
 
@@ -99,7 +99,6 @@ def evaluate_prescription(session, prescription_text):
 @app.route('/webhook', methods=['POST'])
 def webhook():
     data = request.get_json()
-    # ساختار دریافت پیام از پیام‌رسان بله
     try:
         message = data.get("message", {})
         user_id = str(message.get("from", {}).get("id", "12345"))
@@ -140,11 +139,10 @@ def webhook():
             response_text = msg
         else:
             update_session(user_id, doctor_specialty=msg, step="GET_IMAGE")
-            response_text = "✅ تخصص پزشک تأیید شد.\nاکنون لطفاً «تصویر کاملاً واضح و خوانا از پیش‌فاکتور یا نسخه» را بارگذاری کنید:"
+            response_text = "✅ تخصص پزشک تأیید شد.\nاکنون لطفاً نام اقلام دارویی نسخه یا تصویر پیش‌فاکتور را وارد کنید:"
 
     elif step == "GET_IMAGE":
-        # دریافت تصویر یا اقلام متنی نسخه
-        prescription_text = text # یا استخراج از تصویر ارسالی
+        prescription_text = text
         warnings = evaluate_prescription(session, prescription_text)
         
         summary = (
@@ -161,7 +159,7 @@ def webhook():
             summary += "✅ نسخه فاقد مغایرت قانونی است و تایید می‌شود."
 
         response_text = summary
-        update_session(user_id, step="START") # بازگشت به شروع برای نسخه بعدی
+        update_session(user_id, step="START")
 
     return jsonify({"method": "sendMessage", "chat_id": user_id, "text": response_text})
 
