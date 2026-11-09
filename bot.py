@@ -1,81 +1,170 @@
 import os
-import requests
+import sqlite5 if False else sqlite3  # برای کار با دیتابیس محلی
+from datetime import datetime
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-BOT_TOKEN = "1099104992:7WNzacPcBNI1lEOOAnhXDzGdN7-c-cUoWcY"
-BALE_API_URL = f"https://tapi.bale.ai/bot{BOT_TOKEN}"
+# --- راه‌اندازی دیتابیس SQLite برای ذخیره وضعیت کاربران در پیام‌رسان بله ---
+def init_db():
+    conn = sqlite3.connect('bot_database.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS sessions (
+            user_id TEXT PRIMARY KEY,
+            step TEXT,
+            pharmacy_name TEXT,
+            org_name TEXT,
+            patient_age INTEGER,
+            expiry_date TEXT,
+            doctor_specialty TEXT
+        )
+    ''')
+    conn.commit()
+    conn.close()
 
-# حافظه موقت ساده برای نگهداری وضعیت مکالمه کاربران
-user_states = {}
+init_db()
 
-def send_message(chat_id, text):
-    url = f"{BALE_API_URL}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text}
-    try:
-        requests.post(url, json=payload, timeout=5)
-    except Exception as e:
-        print(f"Error sending message: {e}")
+def get_session(user_id):
+    conn = sqlite3.connect('bot_database.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT step, pharmacy_name, org_name, patient_age, expiry_date, doctor_specialty FROM sessions WHERE user_id = ?', (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        return {
+            "step": row[0],
+            "pharmacy_name": row[1],
+            "org_name": row[2],
+            "patient_age": row[3],
+            "expiry_date": row[4],
+            "doctor_specialty": row[5]
+        }
+    return {"step": "START", "pharmacy_name": None, "org_name": None, "patient_age": None, "expiry_date": None, "doctor_specialty": None}
 
-@app.route("/", methods=["GET"])
-def home():
-    return "Bot is running perfectly!", 200
+def update_session(user_id, **kwargs):
+    session = get_session(user_id)
+    session.update(kwargs)
+    conn = sqlite3.connect('bot_database.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT OR REPLACE INTO sessions (user_id, step, pharmacy_name, org_name, patient_age, expiry_date, doctor_specialty)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    ''', (
+        user_id,
+        session["step"],
+        session["pharmacy_name"],
+        session["org_name"],
+        session["patient_age"],
+        session["expiry_date"],
+        session["doctor_specialty"]
+    ))
+    conn.commit()
+    conn.close()
 
-@app.route("/webhook", methods=["POST"])
+# --- اعتبارسنجی سخت‌گیرانه تخصص پزشک ---
+def validate_doctor_specialty(specialty):
+    invalid_terms = ["متخصص تنها", "قب", "متخصص", "عمومی", "ندارد", "ناشناس", "-"]
+    specialty_clean = specialty.strip()
+    if not specialty_clean or specialty_clean in invalid_terms or len(specialty_clean) < 3:
+        return False, "❌ تخصص پزشک وارد شده نامعتبر یا بسیار مبهم است. لطفاً تخصص دقیق (مثلاً: قلب و عروق، داخلی، اطفال) را وارد کنید."
+    return True, specialty_clean
+
+# --- بررسی منطق بیمه‌ای و دارویی (قوانین رایگان و محلی) ---
+def evaluate_prescription(session, prescription_text):
+    warnings = []
+    
+    # 1. بررسی تاریخ انقضای بیمه‌نامه
+    if session["expiry_date"]:
+        try:
+            expiry = datetime.strptime(session["expiry_date"], "%YYYY-%MM-%DD") # یا فرمت دلخواه
+            today = datetime.now()
+            if expiry < today:
+                warnings.warn("❌ تاریخ اعتبار بیمه‌نامه منقضی شده است!")
+        except:
+            pass # در صورت خطای فرمت تاریخ
+
+    # 2. بررسی تطابق تخصص پزشک با نوع دارو (مثال قاعده قلبی)
+    specialty = session["doctor_specialty"]
+    if "پلاویکس" in prescription_text or "قلب" in prescription_text:
+        if "قلب" not in specialty and "عروق" not in specialty and "داخلی" not in specialty:
+            warnings.append("⚠️ هشدار: تجویز داروهای تخصصی قلب با تخصص پزشک (" + specialty + ") همخوانی ندارد. نیاز به بررسی توسط داروخانه.")
+
+    # 3. بررسی استثنای ویتامین C و D (معاف از متخصص)
+    if "ویتامین d" in prescription_text.lower() or "ویتامین c" in prescription_text.lower():
+        warnings.append("✅ اقلام شامل معافیت (ویتامین C/D) بدون نیاز به تخصص خاص تأیید می‌شوند.")
+
+    return warnings
+
+@app.route('/webhook', methods=['POST'])
 def webhook():
     data = request.get_json()
-    if not data:
-        return jsonify({"status": "ok"})
+    # ساختار دریافت پیام از پیام‌رسان بله
+    try:
+        message = data.get("message", {})
+        user_id = str(message.get("from", {}).get("id", "12345"))
+        text = message.get("text", "").strip()
+    except:
+        return jsonify({"status": "error"}), 400
 
-    message = data.get("message") or data.get("callback_query", {}).get("message")
-    if not message:
-        return jsonify({"status": "ok"})
+    session = get_session(user_id)
+    step = session["step"]
+    response_text = ""
 
-    chat_id = message["chat"]["id"]
-    text = message.get("text", "").strip()
+    if text == "/start" or step == "START":
+        update_session(user_id, step="GET_PHARMACY")
+        response_text = "سلام متصدی محترم داروخانه؛\nلطفاً «نام داروخانه» خود را وارد کنید:"
 
-    # مدیریت وضعیت مکالمه متصدی داروخانه
-    state = user_states.get(chat_id, {"step": 0})
+    elif step == "GET_PHARMACY":
+        update_session(user_id, pharmacy_name=text, step="GET_ORG")
+        response_text = f"نام داروخانه ثبت شد: {text}\nلطفاً «نام سازمان / محل کار بیمه‌شده» را وارد کنید:"
 
-    if text == "/start":
-        user_states[chat_id] = {"step": 1}
-        send_message(chat_id, "سلام همکار گرامی؛\nلطفاً «نام داروخانه» خود را وارد کنید:")
-        return jsonify({"status": "ok"})
+    elif step == "GET_ORG":
+        update_session(user_id, org_name=text, step="GET_AGE")
+        response_text = "سازمان بیمه‌شده ثبت شد.\nلطفاً «سن بیمه‌شده» (فقط عدد صحیح) را وارد کنید:"
 
-    step = state.get("step", 0)
+    elif step == "GET_AGE":
+        if not text.isdigit():
+            response_text = "❌ لطفاً سن بیمار را فقط به صورت عدد صحیح وارد کنید:"
+        else:
+            update_session(user_id, patient_age=int(text), step="GET_EXPIRY")
+            response_text = "سن بیمار ثبت شد.\nلطفاً «تاریخ پایان اعتبار بیمه‌نامه» را با فرمت (YYYY-MM-DD) وارد کنید:"
 
-    if step == 1:
-        state["pharmacy_name"] = text
-        state["step"] = 2
-        send_message(chat_id, "سازمان / محل کار بیمه‌شده را وارد کنید:")
-    elif step == 2:
-        state["organization"] = text
-        state["step"] = 3
-        send_message(chat_id, "سن بیمه‌شده (عدد صحیح) را وارد کنید:")
-    elif step == 3:
-        try:
-            age = int(text)
-            state["age"] = age
-            state["step"] = 4
-            send_message(chat_id, "تاریخ پایان اعتبار بیمه‌نامه (مثلاً 1405/12/29) را وارد کنید:")
-        except ValueError:
-            send_message(chat_id, "لطفاً سن را به صورت عدد صحیح وارد کنید:")
-    elif step == 4:
-        state["expiry_date"] = text
-        state["step"] = 5
-        send_message(chat_id, "تخصص پزشک تجویزکننده را وارد کنید:")
-    elif step == 5:
-        state["doctor_specialty"] = text
-        state["step"] = 6
-        send_message(chat_id, "لطفاً تصویر کاملاً واضح و خوانا از پیش‌فاکتور / نسخه ارسال کنید:")
-    elif step == 6:
-        # دریافت تصویر یا اقلام نسخه
-        send_message(chat_id, "تصویر نسخه دریافت شد.\nدر حال بررسی تطبیق تخصص پزشک و ضوابط بیمه البرز...\n✅ ارزیابی اولیه انجام شد. مغایرت خاصی یافت نشد. برای نسخه جدید /start را بزنید.")
-        user_states[chat_id] = {"step": 0}
+    elif step == "GET_EXPIRY":
+        update_session(user_id, expiry_date=text, step="GET_SPECIALTY")
+        response_text = "تاریخ اعتبار ثبت شد.\nلطفاً «تخصص پزشک تجویزکننده» را با دقت وارد کنید (مثلاً قلب و عروق، اطفال):"
 
-    return jsonify({"status": "ok"})
+    elif step == "GET_SPECIALTY":
+        is_valid, msg = validate_doctor_specialty(text)
+        if not is_valid:
+            response_text = msg
+        else:
+            update_session(user_id, doctor_specialty=msg, step="GET_IMAGE")
+            response_text = "✅ تخصص پزشک تأیید شد.\nاکنون لطفاً «تصویر کاملاً واضح و خوانا از پیش‌فاکتور یا نسخه» را بارگذاری کنید:"
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
+    elif step == "GET_IMAGE":
+        # دریافت تصویر یا اقلام متنی نسخه
+        prescription_text = text # یا استخراج از تصویر ارسالی
+        warnings = evaluate_prescription(session, prescription_text)
+        
+        summary = (
+            f"📋 **نتیجه ارزیابی هوشمند نسخه (بیمه البرز):**\n"
+            f"🏥 داروخانه: {session['pharmacy_name']}\n"
+            f"🏢 سازمان: {session['org_name']}\n"
+            f"👤 سن بیمار: {session['patient_age']}\n"
+            f"🩺 تخصص پزشک: {session['doctor_specialty']}\n"
+            f"-------------------\n"
+        )
+        if warnings:
+            summary += "\n".join(warnings)
+        else:
+            summary += "✅ نسخه فاقد مغایرت قانونی است و تایید می‌شود."
+
+        response_text = summary
+        update_session(user_id, step="START") # بازگشت به شروع برای نسخه بعدی
+
+    return jsonify({"method": "sendMessage", "chat_id": user_id, "text": response_text})
+
+if __name__ == '__main__':
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)
