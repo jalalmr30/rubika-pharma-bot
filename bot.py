@@ -8,6 +8,8 @@ app = Flask(__name__)
 
 TOKEN = os.environ.get('BALE_BOT_TOKEN')
 API_URL = f"https://tapi.bale.ai/bot{TOKEN}"
+# اگر کلید API مدل هوش مصنوعی (OpenAI) را در متغیرهای محیطی Render دارید:
+OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY') 
 DB_PATH = 'bot_data.db'
 
 def init_db():
@@ -26,13 +28,6 @@ def get_user(chat_id):
     res = c.fetchone()
     conn.close()
     return res
-
-def reset_user(chat_id):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("UPDATE users SET step='GET_PHARMA', pharma=NULL, org=NULL, age=NULL, expiry=NULL, specialty=NULL WHERE chat_id=?", (chat_id,))
-    conn.commit()
-    conn.close()
 
 def update_user(chat_id, column, value):
     conn = sqlite3.connect(DB_PATH)
@@ -55,10 +50,63 @@ def get_file_from_bale(file_id):
             file_path = res['result']['file_path']
             file_url = f"https://tapi.bale.ai/file/bot{TOKEN}/{file_path}"
             file_data = requests.get(file_url, timeout=15).content
-            return base64.b64encode(file_data).decode('utf-8')
+            return file_data
     except Exception as e:
         print(f"Error downloading file: {e}")
     return None
+
+def analyze_prescription_with_vision(image_bytes, specialty, org, age):
+    """
+    ارسال تصویر به مدل بینایی هوش مصنوعی برای استخراج واقعی اقلام و تطبیق با قوانین بیمه البرز
+    """
+    if not OPENAI_API_KEY:
+        # حالت پشتیبان اگر کلید OpenAI تنظیم نشده باشد
+        return f"⚠️ تصویر دریافت شد.\n👨‍⚕️ تخصص ثبت‌شده: {specialty}\n🏥 سازمان: {org}\n\n(لطفاً کلید OPENAI_API_KEY را در Render تنظیم کنید تا استخراج متنی واقعی از تصویر انجام شود)."
+
+    try:
+        base64_image = base64.b64encode(image_bytes).decode('utf-8')
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {OPENAI_API_KEY}"
+        }
+        
+        prompt_text = (
+            f"تو یک داروساز و کارشناس ارشد بیمه درمان البرز هستی. این تصویر یک پیش‌فاکتور یا نسخه دارویی است. "
+            f"تخصص پزشک تجویزکننده '{specialty}' است و سن بیمار {age} سال و سازمان بیمه‌شده '{org}' است. "
+            f"1. اقلام دارویی، مکمل‌ها و ویتامین‌های موجود در تصویر را تک‌تک استخراج کن. "
+            f"2. بر اساس ضوابط بیمه البرز بررسی کن آیا تجویز هر قلم با تخصص پزشک ('{specialty}') همخوانی دارد یا خیر؟ "
+            f"(مثلاً اگر تخصص عمومی است، مکمل‌ها و داروهای تخصصی مانند پلاویکس نیاز به متخصص دارند و رد می‌شوند، اما ویتامین C و D معاف هستند). "
+            f"3. نتیجه را به صورت خوانا، تفکیک‌شده با علامت‌های تایید (✅) و خطا (❌) همراه با دلیل به زبان فارسی برای متصدی داروخانه بنویس."
+        )
+
+        payload = {
+            "model": "gpt-4o",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt_text},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{base64_image}"
+                            }
+                        }
+                    ]
+                }
+            ],
+            "max_tokens": 800
+        }
+
+        response = requests.post("https://api.openai.com/v1/chat/completions", headers=headers, json=payload, timeout=30)
+        res_json = response.json()
+        
+        if "choices" in res_json:
+            return res_json["choices"][0]["message"]["content"]
+        else:
+            return "❌ خطا در پردازش تصویر توسط موتور هوش مصنوعی."
+    except Exception as e:
+        return f"❌ خطا در اتصال به موتور بینایی: {str(e)}"
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -83,7 +131,6 @@ def webhook():
     user = get_user(chat_id)
     step = user[1] if user else "START"
 
-    # دستور شروع مجدد یا انصراف
     if text == "/start" or text.lower() == "انصراف":
         conn = sqlite3.connect(DB_PATH)
         conn.execute("INSERT OR REPLACE INTO users (chat_id, step) VALUES (?, 'GET_PHARMA')", (chat_id,))
@@ -113,16 +160,18 @@ def webhook():
     elif step == "GET_EXPIRY":
         update_user(chat_id, "expiry", text)
         update_user(chat_id, "step", "GET_SPECIALTY")
-        send_message(chat_id, "تخصص پزشک تجویزکننده را مشخص کنید:\n(لطفاً به صورت کامل بنویسید: **عمومی** یا **متخصص** - مثلاً متخصص قلب، داخلی، اطفال و...)")
+        send_message(chat_id, "تخصص پزشک تجویزکننده را به صورت دقیق مشخص کنید:\n(باید دقیق بنویسید: **عمومی** یا نام تخصص مثل **متخصص قلب**، **متخصص داخلی** و...)")
 
     elif step == "GET_SPECIALTY":
-        if len(text) < 2 or text in ["قب", "پ", "ت"]:
-            send_message(chat_id, "❌ تخصص وارد شده نامعتبر است. لطفاً نوع تخصص را کامل بنویسید (مثال: عمومی، متخصص قلب، داخلی):")
+        # اعتبارسنجی بسیار دقیق برای جلوگیری از عبور با کلمات نامعتبر یا مبهم
+        clean_text = text.lower()
+        if len(text) < 3 or clean_text in ["متخصص تنها", "متخصص", "تخصص", "ندارد", "پ", "قب"]:
+            send_message(chat_id, "❌ تخصص وارد شده مبهم یا ناقص است!\nلطفاً تخصص را به طور کامل مشخص کنید (مثلاً: **پزشک عمومی** یا **متخصص قلب و عروق**):")
             return "OK", 200
 
         update_user(chat_id, "specialty", text)
         update_user(chat_id, "step", "WAIT_PHOTO")
-        send_message(chat_id, f"✅ تخصص ثبت‌شده: **{text}**\n\nحالا تصویر واضح پیش‌فاکتور یا نسخه را ارسال کنید تا اقلام دارویی آن بررسی شوند:")
+        send_message(chat_id, f"✅ تخصص ثبت‌شده: **{text}**\n\nحالا تصویر کاملاً واضح و خوانا از پیش‌فاکتور یا نسخه را ارسال کنید:")
 
     elif step == "WAIT_PHOTO":
         photo_list = message.get('photo')
@@ -131,38 +180,30 @@ def webhook():
         if photo_list or document:
             current_user = get_user(chat_id)
             org = current_user[3] if current_user[3] else "نامشخص"
+            age = current_user[4] if current_user[4] else "نامشخص"
             spec = current_user[6] if current_user[6] else "عمومی"
-            is_general = "عمومی" in spec.lower()
             
-            send_message(chat_id, "⏳ تصویر دریافت شد. در حال پردازش اقلام نسخه...")
+            send_message(chat_id, "⏳ تصویر دریافت شد. در حال ارسال به موتور بینایی هوش مصنوعی و تطبیق با ضوابط بیمه البرز...")
             
             file_id = photo_list[-1]['file_id'] if photo_list else document['file_id']
-            img_base64 = get_file_from_bale(file_id)
+            image_bytes = get_file_from_bale(file_id)
             
-            # ارزیابی اقلام بر اساس تخصص
-            result_text = f"📋 **نتیجه بررسی هوشمند اقلام نسخه**\n"
-            result_text += f"🏥 سازمان: {org} | 👨‍⚕️ تخصص پزشک: {spec}\n"
-            result_text += "----------------------------------------\n"
-            
-            if is_general:
-                result_text += "• **Calcium Forte Eff Tab:** ❌ مغایرت تخصص (نیازمند متخصص).\n"
-                result_text += "• **Omega 3 Zarin:** ❌ مغایرت تخصص (نیازمند متخصص).\n"
-                result_text += "• **Multi Prenatal Daana:** ❌ مغایرت تخصص (نیازمند متخصص).\n"
-                result_text += "• **D Vigel 1000 (ویتامین D):** ✅ تأیید شده (معاف از شرط تخصص).\n"
-                result_text += "• **Ferro Fort Gyn Capsules:** ❌ مغایرت تخصص (نیازمند متخصص).\n"
-            else:
-                result_text += "• **Calcium Forte Eff Tab:** ✅ تأیید شده (تخصص مرتبط).\n"
-                result_text += "• **Omega 3 Zarin:** ✅ تأیید شده (تخصص مرتبط).\n"
-                result_text += "• **Multi Prenatal Daana:** ✅ تأیید شده (تخصص مرتبط).\n"
-                result_text += "• **D Vigel 1000 (ویتامین D):** ✅ تأیید شده.\n"
-                result_text += "• **Ferro Fort Gyn Capsules:** ✅ تأیید شده (تخصص مرتبط).\n"
+            if image_bytes:
+                # تحلیل واقعی با GPT-4o Vision
+                analysis_result = analyze_prescription_with_vision(image_bytes, spec, org, age)
                 
-            result_text += "----------------------------------------\n"
-            result_text += "✅ بررسی نسخه به پایان رسید.\n🔄 برای بررسی نسخه جدید، دستور زیر را بفرستید:\n/start"
+                final_output = f"📋 **نتیجه بررسی هوشمند نسخه**\n"
+                final_output += f"🏥 سازمان: {org} | 👨‍⚕️ تخصص: {spec}\n"
+                final_output += "----------------------------------------\n"
+                final_output += analysis_result
+                final_output += "\n----------------------------------------\n"
+                final_output += "🔄 برای بررسی نسخه جدید، دستور زیر را ارسال کنید:\n/start"
+                
+                send_message(chat_id, final_output)
+            else:
+                send_message(chat_id, "❌ خطا در دانلود تصویر از سرور پیام‌رسان. لطفاً مجدداً ارسال کنید.")
             
-            send_message(chat_id, result_text)
-            
-            # ریست کردن کامل وضعیت کاربر برای نسخه بعدی
+            # ریست کردن وضعیت برای نسخه بعدی
             conn = sqlite3.connect(DB_PATH)
             conn.execute("UPDATE users SET step='START', pharma=NULL, org=NULL, age=NULL, expiry=NULL, specialty=NULL WHERE chat_id=?", (chat_id,))
             conn.commit()
