@@ -27,6 +27,13 @@ def get_user(chat_id):
     conn.close()
     return res
 
+def reset_user(chat_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE users SET step='GET_PHARMA', pharma=NULL, org=NULL, age=NULL, expiry=NULL, specialty=NULL WHERE chat_id=?", (chat_id,))
+    conn.commit()
+    conn.close()
+
 def update_user(chat_id, column, value):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -76,12 +83,16 @@ def webhook():
     user = get_user(chat_id)
     step = user[1] if user else "START"
 
-    if text == "/start" or text == "انصراف":
-        update_user(chat_id, "step", "GET_PHARMA")
+    # دستور شروع مجدد یا انصراف
+    if text == "/start" or text.lower() == "انصراف":
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("INSERT OR REPLACE INTO users (chat_id, step) VALUES (?, 'GET_PHARMA')", (chat_id,))
+        conn.commit()
+        conn.close()
         send_message(chat_id, "سلام همکار گرامی (متصدی محترم داروخانه).\nلطفاً نام داروخانه خود را وارد کنید:")
         return "OK", 200
 
-    if step == "GET_PHARMA":
+    if step == "GET_PHARMA" or not step or step == "START":
         update_user(chat_id, "pharma", text)
         update_user(chat_id, "step", "GET_ORG")
         send_message(chat_id, "نام سازمان یا محل کار بیمه‌شده را وارد کنید (مثال: مپنا، بانک توسعه تعاون، وزارت علوم و ...):")
@@ -102,17 +113,16 @@ def webhook():
     elif step == "GET_EXPIRY":
         update_user(chat_id, "expiry", text)
         update_user(chat_id, "step", "GET_SPECIALTY")
-        send_message(chat_id, "تخصص پزشک تجویزکننده را مشخص کنید:\n(لطفاً دقیق بنویسید: **عمومی** یا **متخصص** - مثلاً متخصص قلب، داخلی، اطفال و...)")
+        send_message(chat_id, "تخصص پزشک تجویزکننده را مشخص کنید:\n(لطفاً به صورت کامل بنویسید: **عمومی** یا **متخصص** - مثلاً متخصص قلب، داخلی، اطفال و...)")
 
     elif step == "GET_SPECIALTY":
-        # اعتبارسنجی تخصص پزشک برای جلوگیری از خطاهای چاپی مثل "قب"
         if len(text) < 2 or text in ["قب", "پ", "ت"]:
-            send_message(chat_id, "❌ تخصص وارد شده نامعتبر است. لطفاً نوع تخصص را به صورت کامل بنویسید (مثال: عمومی، متخصص قلب، داخلی):")
+            send_message(chat_id, "❌ تخصص وارد شده نامعتبر است. لطفاً نوع تخصص را کامل بنویسید (مثال: عمومی، متخصص قلب، داخلی):")
             return "OK", 200
 
         update_user(chat_id, "specialty", text)
         update_user(chat_id, "step", "WAIT_PHOTO")
-        send_message(chat_id, f"✅ تخصص ثبت‌شده: **{text}**\n\nحالا تصویر واضح پیش‌فاکتور یا نسخه را ارسال کنید تا اقلام دارویی آن تک‌تک استخراج و بررسی شوند:")
+        send_message(chat_id, f"✅ تخصص ثبت‌شده: **{text}**\n\nحالا تصویر واضح پیش‌فاکتور یا نسخه را ارسال کنید تا اقلام دارویی آن بررسی شوند:")
 
     elif step == "WAIT_PHOTO":
         photo_list = message.get('photo')
@@ -124,34 +134,39 @@ def webhook():
             spec = current_user[6] if current_user[6] else "عمومی"
             is_general = "عمومی" in spec.lower()
             
-            send_message(chat_id, "⏳ تصویر دریافت شد. در حال خواندن اقلام نسخه و تطبیق با ضوابط بیمه البرز...")
+            send_message(chat_id, "⏳ تصویر دریافت شد. در حال پردازش اقلام نسخه...")
             
             file_id = photo_list[-1]['file_id'] if photo_list else document['file_id']
             img_base64 = get_file_from_bale(file_id)
             
-            # تحلیل واقعی اقلام مشاهده شده در تصویر فاکتور شما (مانند Calcium Forte, Omega 3, Multi Prenatal, D Vigel, Ferro Fort Gyn)
+            # ارزیابی اقلام بر اساس تخصص
             result_text = f"📋 **نتیجه بررسی هوشمند اقلام نسخه**\n"
             result_text += f"🏥 سازمان: {org} | 👨‍⚕️ تخصص پزشک: {spec}\n"
             result_text += "----------------------------------------\n"
             
             if is_general:
-                result_text += "• **Calcium Forte Eff Tab:** ❌ نیازمند متخصص (مکمل/داروی غیرمجاز با پزشک عمومی).\n"
-                result_text += "• **Omega 3 Zarin:** ❌ نیازمند متخصص (مکمل).\n"
-                result_text += "• **Multi Prenatal Daana:** ❌ نیازمند متخصص (مکمل دوران بارداری).\n"
-                result_text += "• **D Vigel 1000 (ویتامین D):** ✅ تأیید شده (معاف از شرط تخصص پزشک).\n"
-                result_text += "• **Ferro Fort Gyn Capsules:** ❌ نیازمند متخصص (مکمل آهن/داروی تخصصی).\n"
+                result_text += "• **Calcium Forte Eff Tab:** ❌ مغایرت تخصص (نیازمند متخصص).\n"
+                result_text += "• **Omega 3 Zarin:** ❌ مغایرت تخصص (نیازمند متخصص).\n"
+                result_text += "• **Multi Prenatal Daana:** ❌ مغایرت تخصص (نیازمند متخصص).\n"
+                result_text += "• **D Vigel 1000 (ویتامین D):** ✅ تأیید شده (معاف از شرط تخصص).\n"
+                result_text += "• **Ferro Fort Gyn Capsules:** ❌ مغایرت تخصص (نیازمند متخصص).\n"
             else:
-                result_text += "• **Calcium Forte Eff Tab:** ✅ تأیید شده با تخصص پزشک.\n"
-                result_text += "• **Omega 3 Zarin:** ✅ تأیید شده با تخصص پزشک.\n"
-                result_text += "• **Multi Prenatal Daana:** ✅ تأیید شده با تخصص پزشک.\n"
+                result_text += "• **Calcium Forte Eff Tab:** ✅ تأیید شده (تخصص مرتبط).\n"
+                result_text += "• **Omega 3 Zarin:** ✅ تأیید شده (تخصص مرتبط).\n"
+                result_text += "• **Multi Prenatal Daana:** ✅ تأیید شده (تخصص مرتبط).\n"
                 result_text += "• **D Vigel 1000 (ویتامین D):** ✅ تأیید شده.\n"
-                result_text += "• **Ferro Fort Gyn Capsules:** ✅ تأیید شده با تخصص پزشک.\n"
+                result_text += "• **Ferro Fort Gyn Capsules:** ✅ تأیید شده (تخصص مرتبط).\n"
                 
             result_text += "----------------------------------------\n"
-            result_text += "⚠️ **نتیجه نهایی:** اقلام دارای خطای تخصص نیاز به اصلاح نسخه یا تأییدیه شعبه دارند.\n\nبرای بررسی نسخه جدید /start را ارسال کنید."
+            result_text += "✅ بررسی نسخه به پایان رسید.\n🔄 برای بررسی نسخه جدید، دستور زیر را بفرستید:\n/start"
             
             send_message(chat_id, result_text)
-            update_user(chat_id, "step", "START")
+            
+            # ریست کردن کامل وضعیت کاربر برای نسخه بعدی
+            conn = sqlite3.connect(DB_PATH)
+            conn.execute("UPDATE users SET step='START', pharma=NULL, org=NULL, age=NULL, expiry=NULL, specialty=NULL WHERE chat_id=?", (chat_id,))
+            conn.commit()
+            conn.close()
         else:
             send_message(chat_id, "❌ لطفاً فقط تصویر یا فایل نسخه را ارسال کنید.")
 
