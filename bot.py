@@ -18,9 +18,8 @@ def run_web():
 Thread(target=run_web).start()
 
 # توکن و آدرس ربات روبیکا
-BOT_TOKEN = "توکن_ربات_شما"
-API_URL = f"https://bot.rubika.ir/v0/{BOT_TOKEN}"
-
+BOT_TOKEN = "توکن_اصلی_بله_خود_را_اینجا_بگذارید"
+API_URL = f"https://tapi.bale.ai/bot{BOT_TOKEN}"
 print("Rubika Pharma Bot (Web Service mode) is LISTENING...")
 
 def main_loop():
