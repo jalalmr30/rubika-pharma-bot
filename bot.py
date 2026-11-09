@@ -10,21 +10,17 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# توکن جدید ربات بله
+# توکن ربات بله
 TOKEN = "1099104992:7WNzacPcBN1I1EOOANhXDzGdN7-c-cUoWcY"
 BALE_API_URL = f"https://tapi.bale.ai/bot{TOKEN}"
 
-# راه‌اندازی گوگل جمنای با کلید محیطی
+# راه‌اندازی گوگل جمنای
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
-    # استفاده از مدل سبک و سریع جمنای
     gemini_model = genai.GenerativeModel('gemini-1.5-flash')
 else:
     logger.error("خطا: متغیر محیطی GEMINI_API_KEY تنظیم نشده است!")
-
-# حافظه موقت ساده برای نگهداری وضعیت مکاتبات کاربران (در محیط واقعی از پایگاه داده استفاده شود)
-user_states = {}
 
 def send_message(chat_id, text):
     """تابع ارسال پیام به کاربر در پیام‌رسان بله"""
@@ -41,16 +37,14 @@ def send_message(chat_id, text):
         return None
 
 def download_bale_file(file_id):
-    """دانلود تصویر یا فایل ارسال شده از بله"""
+    """دانلود تصویر نسخه از بله"""
     try:
-        # ۱. دریافت مسیر فایل از بله
         file_info_url = f"{BALE_API_URL}/getFile?file_id={file_id}"
         resp = requests.get(file_info_url).json()
         if not resp.get("ok"):
             return None
         file_path = resp["result"]["file_path"]
         
-        # ۲. دانلود بایت‌های فایل
         download_url = f"https://tapi.bale.ai/file/bot{TOKEN}/{file_path}"
         file_bytes = requests.get(download_url).content
         return file_bytes
@@ -60,7 +54,7 @@ def download_bale_file(file_id):
 
 @app.route(f"/webhook/{TOKEN}", methods=['POST'])
 def webhook():
-    """مسیر وب‌پوک برای دریافت پیام‌ها از بله"""
+    """مسیر وب‌پوک برای دریافت پیام‌ها و تصاویر از بله"""
     try:
         data = request.get_json()
         if not data:
@@ -72,92 +66,34 @@ def webhook():
 
         chat_id = message["chat"]["id"]
         text = message.get("text", "").strip()
-        
-        # بررسی وضعیت کاربر
-        state = user_states.get(chat_id, {"step": "START"})
+        photo_list = message.get("photo")
+        document = message.get("document")
 
-        # دستور شروع یا ریست
-        if text == "/start" or text == "شروع مجدد":
-            user_states[chat_id] = {"step": "GET_PHARMACY_NAME"}
-            send_message(chat_id, "سلام متصدی محترم داروخانه؛\nبه ربات هوشمند بررسی نسخ و ضوابط دارویی بیمه البرز خوش آمدید.\n\nلطفاً **نام داروخانه** خود را وارد کنید:")
+        # دستور شروع
+        if text == "/start":
+            send_message(chat_id, "سلام متصدی محترم داروخانه؛\nبه ربات هوشمند ارزیابی نسخ بیمه البرز خوش آمدید.\n\nلطفاً **تصویر نسخه یا پیش‌فاکتور** خود را ارسال کنید تا بررسی و تحلیل هوشمند انجام شود.")
             return jsonify({"status": "ok"}), 200
 
-        step = state.get("step")
+        # اگر کاربر تصویر فرستاد
+        if photo_list or document:
+            send_message(chat_id, "⏳ در حال پردازش تصویر و ارزیابی نسخه بر اساس ضوابط بیمه البرز...")
 
-        if step == "GET_PHARMACY_NAME":
-            state["pharmacy_name"] = text
-            state["step"] = "GET_ORGANIZATION"
-            user_states[chat_id] = state
-            send_message(chat_id, "ممنون. حالا لطفاً **نام سازمان / محل کار بیمه‌شده** را وارد کنید:")
-
-        elif step == "GET_ORGANIZATION":
-            state["organization"] = text
-            state["step"] = "GET_AGE"
-            user_states[chat_id] = state
-            send_message(chat_id, "لطفاً **سن بیمه‌شده** (فقط عدد صحیح) را وارد کنید:")
-
-        elif step == "GET_AGE":
-            if not text.isdigit():
-                send_message(chat_id, "خطا: لطفاً سن بیمه‌شده را به صورت عدد صحیح وارد کنید:")
-                return jsonify({"status": "ok"}), 200
-            state["age"] = int(text)
-            state["step"] = "GET_EXPIRY_DATE"
-            user_states[chat_id] = state
-            send_message(chat_id, "لطفاً **تاریخ پایان اعتبار بیمه‌نامه** (مثلاً 1405/12/29) را وارد کنید:")
-
-        elif step == "GET_EXPIRY_DATE":
-            state["expiry_date"] = text
-            state["step"] = "GET_DOCTOR_SPECIALTY"
-            user_states[chat_id] = state
-            send_message(chat_id, "لطفاً **تخصص پزشک تجویزکننده** را با دقت وارد کنید (مثلاً: قلب و عروق، داخلی، عمومی):")
-
-        elif step == "GET_DOCTOR_SPECIALTY":
-            state["doctor_specialty"] = text
-            state["step"] = "GET_IMAGE"
-            user_states[chat_id] = state
-            send_message(chat_id, "اطلاعات اولیه ثبت شد.\nحاکمیت ضوابط آماده است؛ اکنون لطفاً **تصویر کاملاً واضح و خوانا از پیش‌فاکتور یا نسخه** را ارسال کنید:")
-
-        elif step == "GET_IMAGE":
-            # بررسی اینکه آیا کاربر عکس فرستاده است
-            photo_list = message.get("photo")
-            document = message.get("document")
-
-            if not photo_list and not document:
-                send_message(chat_id, "لطفاً یک تصویر واضح از نسخه یا پیش‌فاکتور ارسال کنید:")
-                return jsonify({"status": "ok"}), 200
-
-            send_message(chat_id, "⏳ در حال پردازش تصویر و ارزیابی هوشمند نسخه بر اساس ضوابط بیمه البرز...")
-
-            # انتخاب بزرگترین سایز عکس در صورت ارسال عکس
-            file_id = None
-            if photo_list:
-                file_id = photo_list[-1]["file_id"]
-            elif document:
-                file_id = document["file_id"]
-
+            file_id = photo_list[-1]["file_id"] if photo_list else document["file_id"]
             image_bytes = download_bale_file(file_id)
+
             if not image_bytes:
                 send_message(chat_id, "خطا در دریافت تصویر. لطفاً دوباره تصویر نسخه را بفرستید.")
                 return jsonify({"status": "ok"}), 200
 
-            # تحلیل با جمنای
             if GEMINI_API_KEY:
                 try:
-                    prompt = f"""
-                    تو دستیار هوشمند ارزیابی نسخ دارویی بیمه البرز هستی. اطلاعات زیر از متصدی داروخانه دریافت شده است:
-                    - نام داروخانه: {state.get('pharmacy_name')}
-                    - سازمان بیمه‌شده: {state.get('organization')}
-                    - سن بیمار: {state.get('age')} سال
-                    - تاریخ انقضای بیمه‌نامه: {state.get('expiry_date')}
-                    - تخصص پزشک: {state.get('doctor_specialty')}
-
-                    لطفاً تصویر نسخه/پیش‌فاکتور پیوست شده را بررسی کن و موارد زیر را اعلام کن:
+                    prompt = """
+                    تو دستیار هوشمند بررسی نسخ دارویی بیمه البرز هستی.
+                    تصویر نسخه/پیش‌فاکتور ارسال شده را با دقت بررسی کن و موارد زیر را اعلام کن:
                     ۱. اقلام دارویی تجویز شده
-                    ۲. تطابق تخصص پزشک با داروهای تجویز شده (آیا تخصص فوق با داروها همخوانی دارد یا نیاز به بررسی دارد؟)
-                    ۳. بررسی ضوابط سنی، سقف تعهدات و محدودیت اعتبار
-                    ۴. نتیجه‌گیری نهایی (تایید، نیاز به اصلاح یا عدم تعهد)
+                    ۲. تطابق تخصص پزشک و ضوابط دارویی
+                    ۳. نتیجه‌گیری نهایی (تایید یا نیاز به بررسی بیشتر)
                     """
-                    
                     image_part = {
                         "mime_type": "image/jpeg",
                         "data": image_bytes
@@ -168,15 +104,11 @@ def webhook():
                     logger.error(f"خطا در پردازش هوش مصنوعی: {e}")
                     analysis_text = "خطا در تحلیل هوشمند تصویر نسخه. لطفاً مجدداً تلاش کنید."
             else:
-                analysis_text = "سرویس هوش مصنوعی در حال حاضر غیرفعال است."
+                analysis_text = "سرویس هوش مصنوعی غیرفعال است."
 
-            send_message(chat_id, f"📋 **نتیجه ارزیابی هوشمند نسخه:**\n\n{analysis_text}\n\nبرای بررسی نسخه جدید، دستور /start را ارسال کنید.")
-            # ریست کردن وضعیت برای نسخه جدید
-            user_states[chat_id] = {"step": "START"}
-
+            send_message(chat_id, f"📋 **نتیجه ارزیابی هوشمند نسخه:**\n\n{analysis_text}")
         else:
-            user_states[chat_id] = {"step": "START"}
-            send_message(chat_id, "برای شروع بررسی نسخه، لطفاً دستور /start را ارسال کنید.")
+            send_message(chat_id, "لطفاً برای بررسی نسخه، **تصویر** آن را ارسال کنید یا دستور /start را بزنید.")
 
         return jsonify({"status": "ok"}), 200
 
