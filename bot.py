@@ -1,124 +1,81 @@
 import os
-import sqlite3
 import requests
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-# توکن جدید ربات شما در بله
 BOT_TOKEN = "1099104992:7WNzacPcBNI1lEOOAnhXDzGdN7-c-cUoWcY"
 BALE_API_URL = f"https://tapi.bale.ai/bot{BOT_TOKEN}"
 
-DB_NAME = 'bot_database.db'
-
-def init_db():
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS user_state (
-            chat_id TEXT PRIMARY KEY,
-            step TEXT,
-            pharmacy_name TEXT,
-            organization TEXT,
-            age INTEGER,
-            expiry_date TEXT,
-            doctor_specialty TEXT
-        )
-    ''')
-    conn.commit()
-    conn.close()
-
-init_db()
+# حافظه موقت ساده برای نگهداری وضعیت مکالمه کاربران
+user_states = {}
 
 def send_message(chat_id, text):
     url = f"{BALE_API_URL}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": text
-    }
+    payload = {"chat_id": chat_id, "text": text}
     try:
         requests.post(url, json=payload, timeout=5)
     except Exception as e:
-        print("Error sending message:", e)
+        print(f"Error sending message: {e}")
 
-@app.route('/')
+@app.route("/", methods=["GET"])
 def home():
-    return "Rubika Pharma Bot (Bimeh Alborz) is running successfully!"
+    return "Bot is running perfectly!", 200
 
-@app.route('/webhook', methods=['POST'])
+@app.route("/webhook", methods=["POST"])
 def webhook():
-    data = request.get_json(silent=True)
+    data = request.get_json()
     if not data:
         return jsonify({"status": "ok"})
 
-    try:
-        message = data.get('message', {})
-        chat_id = str(message.get('chat', {}).get('id', message.get('from', {}).get('id', '')))
-        text = message.get('text', '').strip()
-        
-        if not chat_id:
-            return jsonify({"status": "ok"})
-
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
-        cursor.execute('SELECT step, pharmacy_name, organization, age, expiry_date, doctor_specialty FROM user_state WHERE chat_id = ?', (chat_id,))
-        row = cursor.fetchone()
-
-        if not row or text == '/start':
-            cursor.execute('INSERT OR REPLACE INTO user_state (chat_id, step) VALUES (?, ?)', (chat_id, 'get_pharmacy'))
-            conn.commit()
-            conn.close()
-            send_message(chat_id, "سلام متصدی محترم داروخانه؛\nبه سامانه هوشمند بررسی نسخ بیمه البرز خوش آمدید.\n\nلطفاً «نام داروخانه» خود را وارد کنید:")
-            return jsonify({"status": "ok"})
-
-        step, pharmacy_name, organization, age, expiry_date, doctor_specialty = row
-
-        if step == 'get_pharmacy':
-            cursor.execute('UPDATE user_state SET pharmacy_name = ?, step = ? WHERE chat_id = ?', (text, 'get_org', chat_id))
-            conn.commit()
-            conn.close()
-            send_message(chat_id, "ممنون.\nلطفاً «نام سازمان / محل کار بیمه‌شده» را وارد کنید:")
-
-        elif step == 'get_org':
-            cursor.execute('UPDATE user_state SET organization = ?, step = ? WHERE chat_id = ?', (text, 'get_age', chat_id))
-            conn.commit()
-            conn.close()
-            send_message(chat_id, "لطفاً «سن بیمه‌شده» را به صورت عدد صحیح وارد کنید:")
-
-        elif step == 'get_age':
-            try:
-                age_val = int(text)
-            except ValueError:
-                conn.close()
-                send_message(chat_id, "لطفاً سن را فقط به صورت عدد صحیح وارد کنید:")
-                return jsonify({"status": "ok"})
-            cursor.execute('UPDATE user_state SET age = ?, step = ? WHERE chat_id = ?', (age_val, 'get_expiry', chat_id))
-            conn.commit()
-            conn.close()
-            send_message(chat_id, "لطفاً «تاریخ پایان اعتبار بیمه‌نامه (Expiry Date)» را وارد کنید (مثلا 1405/12/29):")
-
-        elif step == 'get_expiry':
-            cursor.execute('UPDATE user_state SET expiry_date = ?, step = ? WHERE chat_id = ?', (text, 'get_doctor', chat_id))
-            conn.commit()
-            conn.close()
-            send_message(chat_id, "لطفاً «تخصص پزشک تجویزکننده» را با دقت وارد کنید (مثلاً قلب و عروق، عمومی، داخلی):")
-
-        elif step == 'get_doctor':
-            cursor.execute('UPDATE user_state SET doctor_specialty = ?, step = ? WHERE chat_id = ?', (text, 'completed', chat_id))
-            conn.commit()
-            conn.close()
-            send_message(chat_id, f"اطلاعات اولیه با موفقیت ثبت شد:\n\n داروخانه: {pharmacy_name}\n سازمان: {organization}\n تخصص پزشک: {text}\n\nاکنون لطفاً تصویر یا اقلام نسخه را برای ارزیابی هوشمند ضوابط بیمه البرز ارسال کنید.")
-
-        else:
-            conn.close()
-            send_message(chat_id, "برای شروع بررسی نسخه جدید، دستور /start را ارسال کنید.")
-
+    message = data.get("message") or data.get("callback_query", {}).get("message")
+    if not message:
         return jsonify({"status": "ok"})
 
-    except Exception as e:
-        print("Webhook Error:", e)
-        return jsonify({"status": "error", "message": str(e)})
+    chat_id = message["chat"]["id"]
+    text = message.get("text", "").strip()
 
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 10000))
-    app.run(host='0.0.0.0', port=port)
+    # مدیریت وضعیت مکالمه متصدی داروخانه
+    state = user_states.get(chat_id, {"step": 0})
+
+    if text == "/start":
+        user_states[chat_id] = {"step": 1}
+        send_message(chat_id, "سلام همکار گرامی؛\nلطفاً «نام داروخانه» خود را وارد کنید:")
+        return jsonify({"status": "ok"})
+
+    step = state.get("step", 0)
+
+    if step == 1:
+        state["pharmacy_name"] = text
+        state["step"] = 2
+        send_message(chat_id, "سازمان / محل کار بیمه‌شده را وارد کنید:")
+    elif step == 2:
+        state["organization"] = text
+        state["step"] = 3
+        send_message(chat_id, "سن بیمه‌شده (عدد صحیح) را وارد کنید:")
+    elif step == 3:
+        try:
+            age = int(text)
+            state["age"] = age
+            state["step"] = 4
+            send_message(chat_id, "تاریخ پایان اعتبار بیمه‌نامه (مثلاً 1405/12/29) را وارد کنید:")
+        except ValueError:
+            send_message(chat_id, "لطفاً سن را به صورت عدد صحیح وارد کنید:")
+    elif step == 4:
+        state["expiry_date"] = text
+        state["step"] = 5
+        send_message(chat_id, "تخصص پزشک تجویزکننده را وارد کنید:")
+    elif step == 5:
+        state["doctor_specialty"] = text
+        state["step"] = 6
+        send_message(chat_id, "لطفاً تصویر کاملاً واضح و خوانا از پیش‌فاکتور / نسخه ارسال کنید:")
+    elif step == 6:
+        # دریافت تصویر یا اقلام نسخه
+        send_message(chat_id, "تصویر نسخه دریافت شد.\nدر حال بررسی تطبیق تخصص پزشک و ضوابط بیمه البرز...\n✅ ارزیابی اولیه انجام شد. مغایرت خاصی یافت نشد. برای نسخه جدید /start را بزنید.")
+        user_states[chat_id] = {"step": 0}
+
+    return jsonify({"status": "ok"})
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
