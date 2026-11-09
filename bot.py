@@ -4,19 +4,21 @@ import requests
 import threading
 from flask import Flask
 
+# تنظیمات وب‌سرور Flask برای پاسخ به پلتفرم Render (Health Check)
 app = Flask(__name__)
 
 @app.route('/')
 def home():
     return "Bale Pharma Bot (Bimeh Alborz) is running successfully!"
 
+# --- تنظیمات ربات در پیام‌رسان بله ---
 BOT_TOKEN = "1099104992:7WNzacPcBN1I1EOOANhXDzGdN7-c-cUoWcY"
 API_URL = f"https://tapi.bale.ai/bot{BOT_TOKEN}"
 
-# ذخیره وضعیت و قفل برای جلوگیری از تداخل و ارسال چندتایی
+# ذخیره موقت وضعیت مکالمه کاربران، آپدیت‌های پردازش‌شده و زمان آخرین پاسخ برای جلوگیری از ارسال چندتایی
 user_states = {}
 processed_updates = set()
-lock = threading.Lock()
+last_message_time = {}
 
 def send_message(chat_id, text):
     try:
@@ -28,6 +30,7 @@ def send_message(chat_id, text):
         print(f"Error sending message: {e}")
 
 def analyze_prescription(state):
+    """منطق هوشمند ارزیابی نسخه بر اساس سازمان، سن، تخصص و ضوابط الحاقیه‌ها"""
     org = state.get("org", "").strip().lower()
     age = state.get("age", 0)
     specialty = state.get("doctor_specialty", "").strip().lower()
@@ -40,7 +43,7 @@ def analyze_prescription(state):
     report += "----------------------------------------\n"
     
     warnings = []
-    is_general = "عمومی" in specialty
+    is_general = "عمومی" in specialty or "عمومى" in specialty
     
     if "تامین" in org:
         report += "🔸 سازمان تامین اجتماعی: اعمال سقف‌های درمانی و ضوابط عمومی.\n"
@@ -50,7 +53,7 @@ def analyze_prescription(state):
         report += f"🔸 سازمان {state.get('org')}: بررسی مطابق ضوابط عمومی و الحاقیه‌های بیمه البرز.\n"
         
     if is_general:
-        warnings.append("⚠️ پزشک تجویزکننده «عمومی» است؛ اقلام تخصصی یا مکمل‌ها نیاز به بررسی بیشتر دارند (به جز ویتامین C و D).")
+        warnings.append("⚠️ پزشک تجویزکننده «عمومی» است؛ اقلام تخصصی یا مکمل‌ها نیاز به بررسی بیشتر یا ارجاع به متخصص دارند (به جز ویتامین C و D).")
     else:
         report += f"✅ تخصص پزشک ({specialty}) با اقلام تخصصی همخوانی دارد.\n"
         
@@ -82,14 +85,15 @@ def main_loop():
                     for update in updates:
                         update_id = update.get("update_id", 0)
                         
-                        with lock:
-                            if update_id in processed_updates:
-                                continue
-                            processed_updates.add(update_id)
-                            offset = max(offset, update_id + 1)
-                            if len(processed_updates) > 2000:
-                                # پاکسازی برای جلوگیری از رشد حافظه
-                                processed_updates.clear()
+                        # آپدیت offset
+                        offset = update_id + 1
+                        
+                        if update_id in processed_updates:
+                            continue
+                        processed_updates.add(update_id)
+                        
+                        if len(processed_updates) > 3000:
+                            processed_updates.clear()
                         
                         message = update.get("message", {})
                         chat = message.get("chat", {})
@@ -99,8 +103,14 @@ def main_loop():
                         if not chat_id:
                             continue
                         
+                        # قفل زمانی (Cooldown) ۲ ثانیه‌ای برای جلوگیری از دریافت درخواست‌های تکراری بله
+                        current_time = time.time()
+                        if chat_id in last_message_time and (current_time - last_message_time[chat_id] < 2.0):
+                            continue
+                        last_message_time[chat_id] = current_time
+                        
                         # دستور شروع گفتگو
-                        if text == "/start" or text == "شروع":
+                        if text == "/start" or text == "شروع" or text == "شروع مجدد":
                             user_states[chat_id] = {"step": "pharmacy_name"}
                             welcome_text = (
                                 "سلام، همکار گرامی داروخانه طرف قرارداد بیمه البرز 🌹\n\n"
@@ -136,7 +146,7 @@ def main_loop():
                             elif step == "expiry":
                                 state["expiry"] = text
                                 state["step"] = "doctor_specialty"
-                                send_message(chat_id, "تخصص پزشک تجویزکننده را وارد کنید (مشخص کنید **عمومی** است یا نام تخصص **متخصص** مثل قلب، داخلی و...):")
+                                send_message(chat_id, "تخصص پزشک تجویزکننده را وارد کنید (مشخص کنید عمومی است یا تخصص خاص مثل قلب، داخلی و...):")
                             
                             elif step == "doctor_specialty":
                                 state["doctor_specialty"] = text
@@ -159,4 +169,18 @@ def main_loop():
                                 else:
                                     send_message(chat_id, "لطفاً تصویر پیش‌فاکتور یا نسخه را به صورت عکس ارسال کنید:")
                         else:
-                            # اگر کاربر بدون
+                            send_message(chat_id, "برای شروع ارزیابی نسخه، لطفاً دستور /start را ارسال کنید.")
+                            
+            else:
+                time.sleep(2)
+        except Exception as e:
+            print(f"Bale connection error: {e}")
+            time.sleep(5)
+
+# اجرای حلقه ربات در پس‌زمینه (Background Thread)
+bot_thread = threading.Thread(target=main_loop, daemon=True)
+bot_thread.start()
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
