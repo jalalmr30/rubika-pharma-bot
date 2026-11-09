@@ -12,10 +12,10 @@ def home():
     return "Bale Pharma Bot (Bimeh Alborz) is running successfully!"
 
 # --- تنظیمات ربات در پیام‌رسان بله ---
-BOT_TOKEN = "1099104992:7WNzacPcBN1I1EOOANhXDzGdN7-c-cUoWcY"  # توکن جدید ربات بله شما
+BOT_TOKEN = "1099104992:7WNzacPcBN1I1EOOANhXDzGdN7-c-cUoWcY"
 API_URL = f"https://tapi.bale.ai/bot{BOT_TOKEN}"
 
-# ذخیره موقت وضعیت مکالمه کاربران (به صورت ساده در حافظه رم)
+# ذخیره موقت وضعیت مکالمه کاربران
 user_states = {}
 
 def send_message(chat_id, text):
@@ -35,7 +35,7 @@ def main_loop():
             # دریافت پیام‌ها از بله با استفاده از Long Polling
             response = requests.post(
                 f"{API_URL}/getUpdates",
-                json={"offset": offset, "limit": 10},
+                json={"offset": offset, "limit": 10, "timeout": 20},
                 timeout=25
             )
             
@@ -44,7 +44,10 @@ def main_loop():
                 if data.get("ok"):
                     updates = data.get("result", [])
                     for update in updates:
-                        offset = update.get("update_id", 0) + 1
+                        update_id = update.get("update_id", 0)
+                        # آپدیت offset بلافاصله برای جلوگیری از تکرار پیام‌ها
+                        offset = update_id + 1
+                        
                         message = update.get("message", {})
                         chat = message.get("chat", {})
                         chat_id = chat.get("id")
@@ -55,11 +58,11 @@ def main_loop():
                         
                         # دستور شروع گفتگو
                         if text == "/start" or text == "شروع":
-                            user_states[chat_id] = {"step": "org"}
+                            user_states[chat_id] = {"step": "pharmacy_name"}
                             welcome_text = (
                                 "سلام، همکار گرامی داروخانه طرف قرارداد بیمه البرز 🌹\n\n"
                                 "به سامانه هوشمند بررسی نسخ و محاسبات الحاقیه‌ها خوش آمدید.\n\n"
-                                "لطفاً **نام سازمان / محل کار بیمه‌شده** را وارد کنید:"
+                                "لطفاً **نام داروخانه** خود را وارد کنید:"
                             )
                             send_message(chat_id, welcome_text)
                             continue
@@ -69,7 +72,12 @@ def main_loop():
                             state = user_states[chat_id]
                             step = state.get("step")
                             
-                            if step == "org":
+                            if step == "pharmacy_name":
+                                state["pharmacy_name"] = text
+                                state["step"] = "org"
+                                send_message(chat_id, "لطفاً **نام سازمان / محل کار بیمه‌شده** را وارد کنید:")
+                            
+                            elif step == "org":
                                 state["org"] = text
                                 state["step"] = "age"
                                 send_message(chat_id, "سن بیمار (فقط عدد صحیح) را وارد کنید:")
@@ -92,12 +100,13 @@ def main_loop():
                                 state["step"] = "image"
                                 send_message(
                                     chat_id, 
-                                    "اطلاعات اولیه ثبت شد.\n\n"
+                                    f"داروخانه: {state.get('pharmacy_name')}\n"
+                                    f"سازمان: {state.get('org')}\n"
+                                    f"اطلاعات اولیه ثبت شد.\n\n"
                                     "حالا لطفاً **تصویر کاملاً واضح و خوانا از پیش‌فاکتور یا نسخه** را ارسال کنید 📷"
                                 )
                             
                             elif step == "image":
-                                # بررسی ارسال تصویر یا فایل از سوی کاربر
                                 if "photo" in message or "document" in message:
                                     send_message(
                                         chat_id,
@@ -108,11 +117,10 @@ def main_loop():
                                 else:
                                     send_message(chat_id, "لطفاً تصویر پیش‌فاکتور یا نسخه را به صورت عکس ارسال کنید:")
                         else:
-                            # اگر کاربر بدون شروع پیام فرستاد
                             send_message(chat_id, "برای شروع ارزیابی نسخه، لطفاً دستور /start را ارسال کنید.")
                             
             else:
-                time.sleep(3)
+                time.sleep(2)
         except Exception as e:
             print(f"Bale connection error: {e}")
             time.sleep(5)
