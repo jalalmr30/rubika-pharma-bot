@@ -4,20 +4,19 @@ import requests
 import threading
 from flask import Flask
 
-# تنظیمات وب‌سرور Flask برای پاسخ به پلتفرم Render (Health Check)
 app = Flask(__name__)
 
 @app.route('/')
 def home():
     return "Bale Pharma Bot (Bimeh Alborz) is running successfully!"
 
-# --- تنظیمات ربات در پیام‌رسان بله ---
 BOT_TOKEN = "1099104992:7WNzacPcBN1I1EOOANhXDzGdN7-c-cUoWcY"
 API_URL = f"https://tapi.bale.ai/bot{BOT_TOKEN}"
 
-# ذخیره موقت وضعیت مکالمه کاربران و لیست آپدیت‌های پردازش‌شده برای جلوگیری از تکرار
+# ذخیره وضعیت و قفل برای جلوگیری از تداخل و ارسال چندتایی
 user_states = {}
 processed_updates = set()
+lock = threading.Lock()
 
 def send_message(chat_id, text):
     try:
@@ -29,7 +28,6 @@ def send_message(chat_id, text):
         print(f"Error sending message: {e}")
 
 def analyze_prescription(state):
-    """منطق هوشمند ارزیابی نسخه بر اساس سازمان، سن، تخصص و ضوابط الحاقیه‌ها"""
     org = state.get("org", "").strip().lower()
     age = state.get("age", 0)
     specialty = state.get("doctor_specialty", "").strip().lower()
@@ -42,11 +40,8 @@ def analyze_prescription(state):
     report += "----------------------------------------\n"
     
     warnings = []
-    
-    # تفکیک پزشک عمومی و متخصص
     is_general = "عمومی" in specialty
     
-    # بررسی ضوابط سازمانی نمونه
     if "تامین" in org:
         report += "🔸 سازمان تامین اجتماعی: اعمال سقف‌های درمانی و ضوابط عمومی.\n"
     elif "تعاون" in org:
@@ -54,10 +49,8 @@ def analyze_prescription(state):
     else:
         report += f"🔸 سازمان {state.get('org')}: بررسی مطابق ضوابط عمومی و الحاقیه‌های بیمه البرز.\n"
         
-    # ضوابط خاص اقلام (مثلاً پلاویکس، مکمل‌ها و مگنی‌فورت)
-    # در اینجا ربات بر اساس متن تصویر یا اقلام شبیه‌سازی‌شده هشدار می‌دهد
     if is_general:
-        warnings.append("⚠️ پزشک تجویزکننده «عمومی» است؛ اقلام تخصصی یا مکمل‌ها نیاز به بررسی بیشتر یا ارجاع به متخصص دارند (به جز ویتامین C و D).")
+        warnings.append("⚠️ پزشک تجویزکننده «عمومی» است؛ اقلام تخصصی یا مکمل‌ها نیاز به بررسی بیشتر دارند (به جز ویتامین C و D).")
     else:
         report += f"✅ تخصص پزشک ({specialty}) با اقلام تخصصی همخوانی دارد.\n"
         
@@ -88,15 +81,15 @@ def main_loop():
                     updates = data.get("result", [])
                     for update in updates:
                         update_id = update.get("update_id", 0)
-                        offset = update_id + 1
                         
-                        # جلوگیری از پردازش تکراری یک آپدیت
-                        if update_id in processed_updates:
-                            continue
-                        processed_updates.add(update_id)
-                        # پاکسازی لیست برای جلوگیری از رشد حافظه
-                        if len(processed_updates) > 1000:
-                            processed_updates.pop()
+                        with lock:
+                            if update_id in processed_updates:
+                                continue
+                            processed_updates.add(update_id)
+                            offset = max(offset, update_id + 1)
+                            if len(processed_updates) > 2000:
+                                # پاکسازی برای جلوگیری از رشد حافظه
+                                processed_updates.clear()
                         
                         message = update.get("message", {})
                         chat = message.get("chat", {})
@@ -143,7 +136,7 @@ def main_loop():
                             elif step == "expiry":
                                 state["expiry"] = text
                                 state["step"] = "doctor_specialty"
-                                send_message(chat_id, "تخصص پزشک تجویزکننده را وارد کنید (لطفاً مشخص کنید **عمومی** است یا نام تخصص **متخصص** مثل قلب، داخلی، زنان و...):")
+                                send_message(chat_id, "تخصص پزشک تجویزکننده را وارد کنید (مشخص کنید **عمومی** است یا نام تخصص **متخصص** مثل قلب، داخلی و...):")
                             
                             elif step == "doctor_specialty":
                                 state["doctor_specialty"] = text
@@ -159,7 +152,6 @@ def main_loop():
                             
                             elif step == "image":
                                 if "photo" in message or "document" in message:
-                                    # اجرای تحلیل هوشمند بر اساس اطلاعات و ضوابط
                                     final_report = analyze_prescription(state)
                                     send_message(chat_id, final_report)
                                     send_message(chat_id, "✅ بررسی نسخه به پایان رسید.\n\n(جهت شروع بررسی نسخه جدید دستور /start را ارسال کنید)")
@@ -167,18 +159,4 @@ def main_loop():
                                 else:
                                     send_message(chat_id, "لطفاً تصویر پیش‌فاکتور یا نسخه را به صورت عکس ارسال کنید:")
                         else:
-                            send_message(chat_id, "برای شروع ارزیابی نسخه، لطفاً دستور /start را ارسال کنید.")
-                            
-            else:
-                time.sleep(2)
-        except Exception as e:
-            print(f"Bale connection error: {e}")
-            time.sleep(5)
-
-# اجرای حلقه ربات در پس‌زمینه (Background Thread)
-bot_thread = threading.Thread(target=main_loop, daemon=True)
-bot_thread.start()
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+                            # اگر کاربر بدون
