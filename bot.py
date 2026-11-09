@@ -4,182 +4,129 @@ import requests
 import threading
 from flask import Flask
 
-# تنظیمات وب‌سرور Flask برای پاسخ به پلتفرم Render (Health Check)
+# تنظیمات وب‌سرور Flask برای پلتفرم Render
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Bale Pharma Bot (Bimeh Alborz) is running successfully!"
+    return "Bale Pharma Bot is stable and running!"
 
-# --- تنظیمات ربات در پیام‌رسان بله ---
+# --- تنظیمات ربات بله ---
 BOT_TOKEN = "1099104992:7WNzacPcBN1I1EOOANhXDzGdN7-c-cUoWcY"
 API_URL = f"https://tapi.bale.ai/bot{BOT_TOKEN}"
 
-# ذخیره موقت وضعیت مکالمه کاربران، آپدیت‌های پردازش‌شده و زمان آخرین پاسخ برای جلوگیری از ارسال چندتایی
+# متغیرهای کنترلی برای جلوگیری از تکرار
 user_states = {}
-processed_updates = set()
-last_message_time = {}
+processed_updates = set()  # شناسه‌های پردازش شده
 
 def send_message(chat_id, text):
     try:
-        requests.post(f"{API_URL}/sendMessage", json={
-            "chat_id": chat_id,
-            "text": text
-        }, timeout=10)
+        requests.post(f"{API_URL}/sendMessage", json={"chat_id": chat_id, "text": text}, timeout=10)
     except Exception as e:
-        print(f"Error sending message: {e}")
+        print(f"Error: {e}")
 
 def analyze_prescription(state):
-    """منطق هوشمند ارزیابی نسخه بر اساس سازمان، سن، تخصص و ضوابط الحاقیه‌ها"""
-    org = state.get("org", "").strip().lower()
+    """تحلیل هوشمند نسخه طبق الحاقیه‌ها"""
+    org = state.get("org", "").strip()
     age = state.get("age", 0)
-    specialty = state.get("doctor_specialty", "").strip().lower()
+    spec = state.get("doctor_specialty", "").strip()
     pharmacy = state.get("pharmacy_name", "")
     
-    report = f"📋 **گزارش ارزیابی هوشمند نسخه**\n"
-    report += f"🏥 داروخانه: {pharmacy}\n"
-    report += f"🏢 سازمان متبوع: {state.get('org')}\n"
-    report += f"👤 سن بیمار: {age} سال | تخصص پزشک: {state.get('doctor_specialty')}\n"
+    report = f"🏥 **داروخانه: {pharmacy}**\n🏢 سازمان: {org}\n👤 سن: {age} | تخصص پزشک: {spec}\n"
     report += "----------------------------------------\n"
     
+    is_general = "عمومی" in spec or "عمومى" in spec
     warnings = []
-    is_general = "عمومی" in specialty or "عمومى" in specialty
     
-    if "تامین" in org:
-        report += "🔸 سازمان تامین اجتماعی: اعمال سقف‌های درمانی و ضوابط عمومی.\n"
-    elif "تعاون" in org:
-        report += "🔸 بانک توسعه تعاون: بررسی الحاقیه اختصاصی بانک.\n"
-    else:
-        report += f"🔸 سازمان {state.get('org')}: بررسی مطابق ضوابط عمومی و الحاقیه‌های بیمه البرز.\n"
-        
+    # تفکیک پزشک عمومی و متخصص
     if is_general:
-        warnings.append("⚠️ پزشک تجویزکننده «عمومی» است؛ اقلام تخصصی یا مکمل‌ها نیاز به بررسی بیشتر یا ارجاع به متخصص دارند (به جز ویتامین C و D).")
+        warnings.append("⚠️ تخصص پزشک «عمومی» است؛ اقلام تخصصی/مکمل نیاز به تایید متخصص دارند.")
     else:
-        report += f"✅ تخصص پزشک ({specialty}) با اقلام تخصصی همخوانی دارد.\n"
-        
-    warnings.append("💡 **قاعده پلاویکس:** بررسی تاریخ جراحی بیمار الزامی است (قابل تأیید تا یک سال پس از عمل).")
-    warnings.append("💡 **مگنی‌فورت و مکمل‌ها:** با تجویز متخصص قابل قبول است؛ نیاز به بررسی مستندات شعبه دارد.")
+        report += f"✅ تخصص {spec} تایید شد.\n"
+
+    # قوانین الحاقیه
+    warnings.append("💡 قاعده پلاویکس: بررسی جراحی در یک سال اخیر الزامی است.")
+    warnings.append("💡 مکمل‌ها و مگنی‌فورت: طبق الحاقیه با تایید شعبه قابل پرداخت است.")
     
-    if warnings:
-        report += "\n🚨 **تذکرات و موارد نیازمند بررسی:**\n" + "\n".join(warnings)
-    else:
-        report += "\n✅ نسخه فاقد مغایرت قانونی بارز است."
-        
+    report += "\n" + "\n".join(warnings)
     return report
 
 def main_loop():
-    print("Bale Pharma Bot (Background Worker) is LISTENING...")
+    print("Bale Bot is starting...")
     offset = 0
     while True:
         try:
-            response = requests.post(
-                f"{API_URL}/getUpdates",
-                json={"offset": offset, "limit": 10, "timeout": 20},
-                timeout=25
-            )
+            # پارامتر offset بسیار حیاتی است
+            response = requests.get(f"{API_URL}/getUpdates", params={"offset": offset, "timeout": 20}, timeout=30)
             
             if response.status_code == 200:
                 data = response.json()
                 if data.get("ok"):
-                    updates = data.get("result", [])
-                    for update in updates:
-                        update_id = update.get("update_id", 0)
+                    for update in data.get("result", []):
+                        update_id = update.get("update_id")
                         
-                        # آپدیت offset
+                        # مهم‌ترین بخش: جلوگیری از پردازش تکراری
+                        if update_id in processed_updates:
+                            offset = update_id + 1
+                            continue
+                        
+                        processed_updates.add(update_id)
                         offset = update_id + 1
                         
-                        if update_id in processed_updates:
-                            continue
-                        processed_updates.add(update_id)
-                        
-                        if len(processed_updates) > 3000:
+                        # محدود کردن حافظه ست
+                        if len(processed_updates) > 5000:
                             processed_updates.clear()
-                        
+
                         message = update.get("message", {})
-                        chat = message.get("chat", {})
-                        chat_id = chat.get("id")
+                        chat_id = message.get("chat", {}).get("id")
                         text = message.get("text", "").strip()
-                        
-                        if not chat_id:
-                            continue
-                        
-                        # قفل زمانی (Cooldown) ۲ ثانیه‌ای برای جلوگیری از دریافت درخواست‌های تکراری بله
-                        current_time = time.time()
-                        if chat_id in last_message_time and (current_time - last_message_time[chat_id] < 2.0):
-                            continue
-                        last_message_time[chat_id] = current_time
-                        
-                        # دستور شروع گفتگو
-                        if text == "/start" or text == "شروع" or text == "شروع مجدد":
+
+                        if not chat_id: continue
+
+                        # منطق پاسخ‌دهی
+                        if text == "/start" or text == "شروع":
                             user_states[chat_id] = {"step": "pharmacy_name"}
-                            welcome_text = (
-                                "سلام، همکار گرامی داروخانه طرف قرارداد بیمه البرز 🌹\n\n"
-                                "به سامانه هوشمند بررسی نسخ و محاسبات الحاقیه‌ها خوش آمدید.\n\n"
-                                "لطفاً **نام داروخانه** خود را وارد کنید:"
-                            )
-                            send_message(chat_id, welcome_text)
-                            continue
+                            send_message(chat_id, "سلام همکار گرامی 🌹\nلطفاً **نام داروخانه** خود را وارد کنید:")
                         
-                        # مدیریت مراحل دریافت اطلاعات
-                        if chat_id in user_states:
+                        elif chat_id in user_states:
                             state = user_states[chat_id]
                             step = state.get("step")
-                            
+
                             if step == "pharmacy_name":
-                                state["pharmacy_name"] = text
-                                state["step"] = "org"
-                                send_message(chat_id, "لطفاً **نام سازمان / محل کار بیمه‌شده** (مثلاً تامین اجتماعی، بانک توسعه تعاون، مپنا و...) را وارد کنید:")
+                                state.update({"pharmacy_name": text, "step": "org"})
+                                send_message(chat_id, "نام **سازمان / ارگان** بیمه‌شده را وارد کنید:")
                             
                             elif step == "org":
-                                state["org"] = text
-                                state["step"] = "age"
-                                send_message(chat_id, "سن بیمار (فقط عدد صحیح) را وارد کنید:")
+                                state.update({"org": text, "step": "age"})
+                                send_message(chat_id, "سن بیمار را وارد کنید (عدد):")
                             
                             elif step == "age":
-                                if not text.isdigit():
-                                    send_message(chat_id, "لطفاً سن بیمار را فقط به صورت عدد صحیح وارد کنید:")
-                                    continue
-                                state["age"] = int(text)
-                                state["step"] = "expiry"
-                                send_message(chat_id, "تاریخ پایان اعتبار بیمه‌نامه (مثلاً 1405/12/29) را وارد کنید:")
+                                if text.isdigit():
+                                    state.update({"age": int(text), "step": "spec"})
+                                    send_message(chat_id, "تخصص پزشک (عمومی یا متخصص با ذکر رشته) را وارد کنید:")
+                                else:
+                                    send_message(chat_id, "لطفاً سن را فقط به عدد وارد کنید:")
                             
-                            elif step == "expiry":
-                                state["expiry"] = text
-                                state["step"] = "doctor_specialty"
-                                send_message(chat_id, "تخصص پزشک تجویزکننده را وارد کنید (مشخص کنید عمومی است یا تخصص خاص مثل قلب، داخلی و...):")
-                            
-                            elif step == "doctor_specialty":
-                                state["doctor_specialty"] = text
-                                state["step"] = "image"
-                                send_message(
-                                    chat_id, 
-                                    f"📌 اطلاعات ثبت‌شده:\n"
-                                    f"▫️ داروخانه: {state.get('pharmacy_name')}\n"
-                                    f"▫️ سازمان: {state.get('org')}\n"
-                                    f"▫️ سن: {state.get('age')} | تخصص: {text}\n\n"
-                                    "حالا لطفاً **تصویر کاملاً واضح و خوانا از پیش‌فاکتور یا نسخه** را ارسال کنید 📷"
-                                )
+                            elif step == "spec":
+                                state.update({"doctor_specialty": text, "step": "image"})
+                                send_message(chat_id, "حالا تصویر نسخه را ارسال کنید 📷")
                             
                             elif step == "image":
                                 if "photo" in message or "document" in message:
-                                    final_report = analyze_prescription(state)
-                                    send_message(chat_id, final_report)
-                                    send_message(chat_id, "✅ بررسی نسخه به پایان رسید.\n\n(جهت شروع بررسی نسخه جدید دستور /start را ارسال کنید)")
-                                    user_states.pop(chat_id, None)
+                                    report = analyze_prescription(state)
+                                    send_message(chat_id, report)
+                                    send_message(chat_id, "✅ بررسی تمام شد. برای نسخه جدید /start بزنید.")
+                                    del user_states[chat_id]
                                 else:
-                                    send_message(chat_id, "لطفاً تصویر پیش‌فاکتور یا نسخه را به صورت عکس ارسال کنید:")
-                        else:
-                            send_message(chat_id, "برای شروع ارزیابی نسخه، لطفاً دستور /start را ارسال کنید.")
-                            
-            else:
-                time.sleep(2)
+                                    send_message(chat_id, "لطفاً فقط فایل تصویری نسخه را بفرستید.")
+            
+            time.sleep(1) # وقفه کوتاه برای پایداری بیشتر
         except Exception as e:
-            print(f"Bale connection error: {e}")
+            print(f"Error: {e}")
             time.sleep(5)
 
-# اجرای حلقه ربات در پس‌زمینه (Background Thread)
-bot_thread = threading.Thread(target=main_loop, daemon=True)
-bot_thread.start()
+# اجرای ربات در ترد جداگانه
+threading.Thread(target=main_loop, daemon=True).start()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
