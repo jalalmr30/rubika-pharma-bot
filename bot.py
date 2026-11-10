@@ -18,7 +18,7 @@ if GEMINI_API_KEY:
     except Exception as e:
         logger.error(f"Gemini config error: {e}")
 
-# مدیریت وضعیت دقیق کاربران
+# مدیریت وضعیت دقیق کاربران (جلوگیری از تداخل و ارسال همزمان سوالات)
 user_states = {}
 
 BALE_API_URL = f"https://tapi.bale.ai/bot{TOKEN}"
@@ -42,7 +42,7 @@ def get_file_url(file_id):
         logger.error(f"Error getting file url: {e}")
     return None
 
-def analyze_prescription(image_url, organization, specialty):
+def analyze_prescription(image_url, pharmacy, organization, specialty):
     try:
         if not GEMINI_API_KEY:
             return "❌ خطا: کلید هوش مصنوعی تنظیم نشده است."
@@ -56,13 +56,14 @@ def analyze_prescription(image_url, organization, specialty):
         prompt = (
             f"تو یک کارشناس ارشد و ناظر اسناد پزشکی و دارویی بیمه البرز هستی.\n"
             f"مشخصات نسخه:\n"
+            f"- داروخانه متقاضی: {pharmacy}\n"
             f"- سازمان بیمه‌شده / ارگان متبوع: {organization}\n"
             f"- تخصص پزشک تجویزکننده: {specialty}\n\n"
             f"دستورالعمل:\n"
             f"۱. اقلام دارویی، مکمل‌ها یا ویتامین‌های موجود در تصویر را تک‌به‌تک و شماره‌گذاری شده استخراج کن.\n"
             f"۲. تطابق داروها با تخصص پزشک ({specialty}) را بررسی کن.\n"
-            f"۳. قوانین و ضوابط شیوه نامه سازمان '{organization}' و بیمه البرز را روی هر قلم اعمال کن.\n"
-            f"۴. وضعیت هر قلم (قابل پرداخت / نیازمند تایید پزشک معتمد / غیرقابل پرداخت) و دلیل آن را بنویس.\n"
+            f"۳. قوانین و ضوابط شیوه‌نامه سازمان '{organization}' و بیمه البرز را روی هر قلم اعمال کن.\n"
+            f"۴. وضعیت هر قلم (قابل پرداخت / نیازمند تایید پزشک معتمد / غیرقابل پرداخت) و دلیل کارشناسی آن را بنویس.\n"
             f"۵. در انتها نتیجه کلی ارزیابی را اعلام کن."
         )
 
@@ -99,32 +100,47 @@ def webhook():
         if not chat_id:
             return jsonify({"status": "no chat_id"}), 200
 
-        # اگر دستور شروع ارسال شد، وضعیت را کاملاً ریست کرده و فقط گام اول را بپرس
+        # دستور شروع یا ریست کامل
         if text in ["/start", "شروع", "شروع مجدد", "restart"]:
-            user_states[chat_id] = {"step": "WAIT_ORG", "org": "", "spec": ""}
+            user_states[chat_id] = {"step": "WAIT_PHARMACY", "pharmacy": "", "org": "", "spec": ""}
             send_message(
                 chat_id,
                 "سلام متصدی محترم داروخانه؛\n"
                 "به سامانه بررسی هوشمند اسناد دارویی بیمه البرز خوش آمدید.\n\n"
-                "📌 **مرحله ۱ از ۳:** لطفاً **نام سازمان بیمه‌شده / ارگان متبوع** را وارد نمایید (مثال: بانک توسعه تعاون، جهاد کشاورزی، نفتکش و...):"
+                "📌 **مرحله ۱ از ۴:** لطفاً **نام داروخانه** را وارد نمایید:"
             )
             return jsonify({"status": "ok"}), 200
 
-        # اگر کاربر هنوز وضعیت ندارد، به عنوان شروع در نظر بگیر
+        # اگر کاربر جدید است یا سابقه ندارد
         if chat_id not in user_states:
-            user_states[chat_id] = {"step": "WAIT_ORG", "org": "", "spec": ""}
+            user_states[chat_id] = {"step": "WAIT_PHARMACY", "pharmacy": "", "org": "", "spec": ""}
             send_message(
                 chat_id,
                 "سلام متصدی محترم داروخانه؛\n"
                 "به سامانه بررسی هوشمند اسناد دارویی بیمه البرز خوش آمدید.\n\n"
-                "📌 **مرحله ۱ از ۳:** لطفاً **نام سازمان بیمه‌شده / ارگان متبوع** را وارد نمایید:"
+                "📌 **مرحله ۱ از ۴:** لطفاً **نام داروخانه** را وارد نمایید:"
             )
             return jsonify({"status": "ok"}), 200
 
         state = user_states[chat_id]
 
-        # گام ۱: دریافت سازمان
-        if state["step"] == "WAIT_ORG":
+        # گام ۱: دریافت نام داروخانه
+        if state["step"] == "WAIT_PHARMACY":
+            if not text or len(text) < 2:
+                send_message(chat_id, "⚠️ لطفاً نام معتبری برای داروخانه وارد کنید:")
+                return jsonify({"status": "ok"}), 200
+
+            state["pharmacy"] = text
+            state["step"] = "WAIT_ORG"
+            send_message(
+                chat_id,
+                f"✅ داروخانه ثبت شد: **{text}**\n\n"
+                "📌 **مرحله ۲ از ۴:** لطفاً **نام سازمان بیمه‌شده / ارگان متبوع** را وارد نمایید (مثال: بانک توسعه تعاون، جهاد کشاورزی، نفتکش و...):"
+            )
+            return jsonify({"status": "ok"}), 200
+
+        # گام ۲: دریافت سازمان بیمه‌شده
+        elif state["step"] == "WAIT_ORG":
             if not text or len(text) < 2:
                 send_message(chat_id, "⚠️ لطفاً نام صحیح سازمان بیمه‌شده را وارد کنید:")
                 return jsonify({"status": "ok"}), 200
@@ -134,11 +150,11 @@ def webhook():
             send_message(
                 chat_id,
                 f"✅ سازمان ثبت شد: **{text}**\n\n"
-                "📌 **مرحله ۲ از ۳:** لطفاً **تخصص پزشک تجویزکننده** را وارد کنید (مثال: عمومی، قلب و عروق، داخلی و...):"
+                "📌 **مرحله ۳ از ۴:** لطفاً **تخصص پزشک تجویزکننده** را وارد کنید (مثال: عمومی، قلب و عروق، داخلی و...):"
             )
             return jsonify({"status": "ok"}), 200
 
-        # گام ۲: دریافت تخصص پزشک با اعتبارسنجی
+        # گام ۳: دریافت تخصص پزشک با اعتبارسنجی
         elif state["step"] == "WAIT_SPEC":
             if not text or len(text) < 2:
                 send_message(chat_id, "⚠️ خطای ورودی! لطفاً تخصص پزشک را به صورت صحیح (مثلاً عمومی یا متخصص داخلی) تایپ کنید:")
@@ -149,11 +165,11 @@ def webhook():
             send_message(
                 chat_id,
                 f"✅ تخصص پزشک: **{text}** ثبت شد.\n\n"
-                "📌 **مرحله ۳ از ۳:** اکنون لطفاً **تصویر واضح، خوانا و اسکن‌شده از نسخه یا پیش‌فاکتور** را ارسال فرمایید:"
+                "📌 **مرحله ۴ از ۴:** اکنون لطفاً **تصویر واضح، خوانا و اسکن‌شده از نسخه یا پیش‌فاکتور** را ارسال فرمایید:"
             )
             return jsonify({"status": "ok"}), 200
 
-        # گام ۳: دریافت تصویر و پردازش نهایی
+        # گام ۴: دریافت تصویر و پردازش نهایی
         elif state["step"] == "WAIT_IMG":
             file_id = None
             if photo:
@@ -173,11 +189,11 @@ def webhook():
                 return jsonify({"status": "ok"}), 200
 
             # تحلیل با هوش مصنوعی
-            result = analyze_prescription(img_url, state["org"], state["spec"])
+            result = analyze_prescription(img_url, state["pharmacy"], state["org"], state["spec"])
             send_message(chat_id, f"📋 **نتیجه ارزیابی نسخه:**\n\n{result}")
 
             # بازنشانی کامل وضعیت برای جلوگیری از تداخل در نسخه بعدی
-            user_states[chat_id] = {"step": "WAIT_ORG", "org": "", "spec": ""}
+            user_states[chat_id] = {"step": "WAIT_PHARMACY", "pharmacy": "", "org": "", "spec": ""}
             send_message(
                 chat_id, 
                 "✅ بررسی به پایان رسید.\n"
