@@ -9,7 +9,6 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# توکن ثابت و دقیق شما
 TOKEN = "1099104992:7WNzacPcBN1I1EOOANhXDzGdN7-c-cUoWcY"
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
@@ -19,7 +18,7 @@ if GEMINI_API_KEY:
     except Exception as e:
         logger.error(f"Gemini config error: {e}")
 
-# دیکشنری نگهداری وضعیت کاربر
+# مدیریت وضعیت کاربران: شامل مرحله، نام سازمان، و تخصص پزشک
 user_states = {}
 
 BALE_API_URL = f"https://tapi.bale.ai/bot{TOKEN}"
@@ -28,8 +27,7 @@ def send_message(chat_id, text):
     try:
         url = f"{BALE_API_URL}/sendMessage"
         payload = {"chat_id": chat_id, "text": text}
-        res = requests.post(url, json=payload, timeout=10)
-        logger.info(f"Send message status: {res.status_code}")
+        requests.post(url, json=payload, timeout=10)
     except Exception as e:
         logger.error(f"Error sending message: {e}")
 
@@ -44,7 +42,7 @@ def get_file_url(file_id):
         logger.error(f"Error getting file url: {e}")
     return None
 
-def analyze_prescription(image_url, specialty):
+def analyze_prescription(image_url, organization, specialty):
     try:
         if not GEMINI_API_KEY:
             return "❌ خطا: کلید هوش مصنوعی (GEMINI_API_KEY) تنظیم نشده است."
@@ -56,14 +54,16 @@ def analyze_prescription(image_url, specialty):
         image_bytes = img_resp.content
 
         prompt = (
-            f"نقش: کارشناس ارشد رسیدگی به اسناد پزشکی و نسخ دارویی بیمه البرز.\n"
-            f"تخصص پزشک تجویزکننده: {specialty}\n\n"
-            f"دستورالعمل:\n"
-            f"۱. اقلام نسخه یا فاکتور را خط به خط و تفکیک‌شده استخراج کن.\n"
-            f"۲. تطابق داروها با تخصص پزشک ({specialty}) را بررسی کن.\n"
-            f"۳. قوانین بیمه البرز (مکمل‌ها، ویتامین‌ها، داروهای برند و غیربیمه‌ای) را روی اقلام اعمال کن.\n"
-            f"۴. به ازای هر قلم: وضعیت (تایید / نیازمند مدارک / غیرقابل پرداخت) و علت را ذکر کن.\n"
-            f"۵. نظر نهایی را خلاصه بنویس."
+            f"تو یک کارشناس ارشد و ناظر تخصصی اسناد پزشکی و دارویی بیمه البرز هستی.\n"
+            f"مشخصات نسخه:\n"
+            f"- سازمان بیمه‌شده / ارگان متبوع: {organization}\n"
+            f"- تخصص پزشک تجویزکننده: {specialty}\n\n"
+            f"دستورالعمل ارزیابی:\n"
+            f"۱. اقلام دارویی، مکمل‌ها یا تجهیزات موجود در تصویر را تک‌به‌تک و به صورت شماره‌گذاری شده استخراج کن.\n"
+            f"۲. بررسی کن آیا تجویز هر قلم با تخصص پزشک ({specialty}) مطابقت دارد یا خیر؟\n"
+            f"۳. قوانین اختصاصی سازمان '{organization}' و ضوابط عمومی بیمه البرز (مانند محدودیت مکمل‌ها، ویتامین‌ها، داروهای برند و غیربیمه‌ای) را روی اقلام اعمال کن.\n"
+            f"۴. به ازای هر قلم دارو، وضعیت دقیق (قابل پرداخت / مشروط به تایید / غیرقابل پرداخت) و دلیل حقوقی/کارشناسی آن را ذکر کن.\n"
+            f"۵. در نهایت نظر کلی و نتیجه ارزیابی را به متصدی داروخانه اعلام کن."
         )
 
         model = genai.GenerativeModel("gemini-1.5-flash")
@@ -75,7 +75,6 @@ def analyze_prescription(image_url, specialty):
         logger.error(f"AI Error: {e}")
         return f"خطا در پردازش تصویر: {e}"
 
-# هم مسیر با توکن و هم بدون توکن تعریف شده تا هیچ درخواستی رد نشود
 @app.route("/", methods=["GET"])
 def home():
     return "Pharma Bot is Running!", 200
@@ -100,27 +99,42 @@ def webhook():
         if not chat_id:
             return jsonify({"status": "no chat_id"}), 200
 
-        # کاربر جدید
+        # مقداردهی اولیه وضعیت کاربر
         if chat_id not in user_states:
-            user_states[chat_id] = {"step": "WAIT_SPEC", "spec": ""}
+            user_states[chat_id] = {"step": "WAIT_ORG", "org": "", "spec": ""}
 
         state = user_states[chat_id]
 
-        # دستورات شروع مجدد
+        # دستور شروع یا ریست
         if text in ["/start", "شروع", "شروع مجدد", "restart"]:
-            user_states[chat_id] = {"step": "WAIT_SPEC", "spec": ""}
+            user_states[chat_id] = {"step": "WAIT_ORG", "org": "", "spec": ""}
             send_message(
                 chat_id,
                 "سلام متصدی محترم داروخانه؛\n"
                 "به سامانه بررسی هوشمند اسناد دارویی بیمه البرز خوش آمدید.\n\n"
-                "لطفاً **تخصص پزشک تجویزکننده** را وارد نمایید (مثال: عمومی، قلب و عروق، اطفال، داخلی و...):"
+                "لطفاً **نام سازمان بیمه‌شده / ارگان متبوع** را وارد نمایید (مثال: بانک توسعه تعاون، جهاد کشاورزی، شرکت ملی نفتکش، دانشگاه تربیت مدرس، آزاد/سایر و...):"
             )
             return jsonify({"status": "ok"}), 200
 
-        # مرحله اول: گرفتن تخصص
-        if state["step"] == "WAIT_SPEC":
-            if not text:
-                send_message(chat_id, "لطفاً تخصص پزشک را تایپ کنید:")
+        # گام ۱: دریافت سازمان بیمه‌شده
+        if state["step"] == "WAIT_ORG":
+            if not text or len(text) < 2:
+                send_message(chat_id, "⚠️ نام سازمان وارد شده معتبر به نظر می‌رسد. لطفاً نام سازمان بیمه‌شده را به طور صحیح وارد کنید:")
+                return jsonify({"status": "ok"}), 200
+
+            state["org"] = text
+            state["step"] = "WAIT_SPEC"
+            send_message(
+                chat_id,
+                f"✅ سازمان ثبت شد: **{text}**\n\n"
+                "اکنون لطفاً **تخصص پزشک تجویزکننده** را وارد کنید (مثال: عمومی، قلب و عروق، داخلی، اطفال و...):"
+            )
+            return jsonify({"status": "ok"}), 200
+
+        # گام ۲: دریافت تخصص پزشک با اعتبارسنجی ساده
+        elif state["step"] == "WAIT_SPEC":
+            if not text or len(text) < 2:
+                send_message(chat_id, "⚠️ خطای تایپی یا ورودی نامعتبر! لطفاً تخصص پزشک را به صورت صحیح (مثلاً عمومی یا متخصص قلب) وارد کنید:")
                 return jsonify({"status": "ok"}), 200
 
             state["spec"] = text
@@ -128,11 +142,11 @@ def webhook():
             send_message(
                 chat_id,
                 f"✅ تخصص پزشک: **{text}** ثبت شد.\n\n"
-                "اکنون لطفاً **تصویر باکیفیت و واضح نسخه یا فاکتور** را ارسال فرمایید:"
+                "📷 لطفاً اکنون **تصویر واضح، خوانا و اسکن‌شده از نسخه یا پیش‌فاکتور** را ارسال فرمایید:"
             )
             return jsonify({"status": "ok"}), 200
 
-        # مرحله دوم: گرفتن عکس و پردازش
+        # گام ۳: دریافت تصویر و تحلیل هوشمند
         elif state["step"] == "WAIT_IMG":
             file_id = None
             if photo:
@@ -141,22 +155,27 @@ def webhook():
                 file_id = document.get("file_id")
 
             if not file_id:
-                send_message(chat_id, "⚠️ لطفاً یک تصویر (عکس نسخه) ارسال کنید.")
+                send_message(chat_id, "⚠️ لطفاً حتماً تصویر نسخه (عکس) را ارسال کنید.")
                 return jsonify({"status": "ok"}), 200
 
-            send_message(chat_id, "⏳ تصویر دریافت شد. در حال استخراج و بررسی بند به بند طبق ضوابط...")
+            send_message(chat_id, "⏳ تصویر دریافت شد. در حال استخراج اقلام و بررسی بند به بند طبق ضوابط سازمان مربوطه...")
             img_url = get_file_url(file_id)
 
             if not img_url:
-                send_message(chat_id, "❌ دریافت فایل ممکن نشد. لطفاً مجدد تلاش کنید.")
+                send_message(chat_id, "❌ دریافت فایل ممکن نشد. لطفاً مجدداً تصویر را ارسال کنید.")
                 return jsonify({"status": "ok"}), 200
 
-            result = analyze_prescription(img_url, state["spec"])
-            send_message(chat_id, f"📋 **نتیجه ارزیابی:**\n\n{result}")
+            # تحلیل با هوش مصنوعی
+            result = analyze_prescription(img_url, state["org"], state["spec"])
+            send_message(chat_id, f"📋 **نتیجه ارزیابی و رسیدگی نسخه:**\n\n{result}")
 
-            # بازنشانی برای نسخه بعدی
-            user_states[chat_id] = {"step": "WAIT_SPEC", "spec": ""}
-            send_message(chat_id, "🔄 بررسی پایان یافت. برای نسخه بعدی، مجدداً **تخصص پزشک** را وارد کنید.")
+            # پاک‌سازی حافظه این کاربر برای جلوگیری از تداخل با نسخه بعدی
+            user_states[chat_id] = {"step": "WAIT_ORG", "org": "", "spec": ""}
+            send_message(
+                chat_id, 
+                "✅ بررسی این نسخه به پایان رسید.\n"
+                "🔄 برای بررسی نسخه جدید، لطفاً دستور /start را ارسال کنید یا نام سازمان جدید را وارد نمایید."
+            )
             return jsonify({"status": "ok"}), 200
 
         return jsonify({"status": "ok"}), 200
