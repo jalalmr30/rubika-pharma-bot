@@ -23,95 +23,128 @@ if GEMINI_API_KEY:
 user_states = {}
 BALE_API_URL = f"https://tapi.bale.ai/bot{TOKEN}"
 
-def send_message(chat_id, text):
-    """ارسال پیام با تقسیم هوشمند متن برای جلوگیری از محدودیت بله"""
+VALID_ORGS = {
+    "1": "بانک توسعه تعاون",
+    "2": "جهاد کشاورزی",
+    "3": "شرکت ملی نفتکش ایران",
+    "4": "مادر تخصصی بازرگانی دولتی",
+    "5": "گروه مپنا",
+    "6": "بنیاد مسکن انقلاب اسلامی",
+    "7": "سازمان توسعه و نوسازی معادن (ایمیدرو)",
+    "8": "سازمان فضایی / فناوری اطلاعات",
+    "9": "سایر ارگان‌های طرف قرارداد بیمه البرز"
+}
+
+def send_bale_msg(chat_id, text):
+    """ارسال متن ساده و ایمن بدون به هم ریختگی در بله"""
     try:
         url = f"{BALE_API_URL}/sendMessage"
-        max_len = 1800
-        for i in range(0, len(text), max_len):
-            chunk = text[i:i + max_len]
-            requests.post(url, json={"chat_id": chat_id, "text": chunk}, timeout=15)
+        # برش به قطعات ۱۲۰۰ کاراکتری
+        max_chunk = 1200
+        for i in range(0, len(text), max_chunk):
+            sub_text = text[i:i + max_chunk]
+            requests.post(url, json={"chat_id": chat_id, "text": sub_text}, timeout=15)
     except Exception as e:
-        logger.error(f"Error sending message: {e}")
+        logger.error(f"Error sending msg: {e}")
 
-def get_bale_file_bytes(file_id):
-    """دریافت امن بایت‌های تصویر نسخه از سرور بله"""
+def get_file_content(file_id):
+    """دریافت مستقیم بایت‌های عکس از سرور بله"""
     try:
-        url = f"{BALE_API_URL}/getFile?file_id={file_id}"
-        resp = requests.get(url, timeout=20).json()
-        if not resp.get("ok"):
-            logger.error(f"getFile error response: {resp}")
+        info_url = f"{BALE_API_URL}/getFile?file_id={file_id}"
+        res = requests.get(info_url, timeout=20).json()
+        if not res.get("ok"):
+            logger.error(f"getFile failed: {res}")
             return None
-
-        file_path = resp.get("result", {}).get("file_path")
+        
+        file_path = res["result"].get("file_path")
         if not file_path:
             return None
-
+            
         dl_url = f"https://tapi.bale.ai/file/bot{TOKEN}/{file_path}"
-        dl_resp = requests.get(dl_url, timeout=35)
-        if dl_resp.status_code == 200:
-            return dl_resp.content
+        r = requests.get(dl_url, timeout=40)
+        if r.status_code == 200:
+            return r.content
         else:
-            logger.error(f"Download HTTP status: {dl_resp.status_code}")
+            logger.error(f"Download failed with status: {r.status_code}")
     except Exception as e:
-        logger.error(f"Download file exception: {e}")
+        logger.error(f"Exception downloading file: {e}")
     return None
 
-def analyze_prescription(chat_id, file_id, pharmacy, org, doc_type, specialty):
-    """تحلیل دقیق نسخه توسط هوش مصنوعی و ارسال خروجی به متصدی داروخانه"""
+def process_prescription_ai(chat_id, file_id, pharmacy, org, doc_type, specialty):
     try:
         if not GEMINI_API_KEY:
-            send_message(chat_id, "❌ خطا: کلید هوش مصنوعی در سرور فعال نشده است.")
+            send_bale_msg(chat_id, "❌ خطای سیستمی: کلید هوش مصنوعی (GEMINI_API_KEY) روی سرور ست نشده است.")
             return
 
-        send_message(chat_id, "⏳ تصویر در حال پردازش توسط هوش مصنوعی است، لطفاً چند لحظه صبر کنید...")
-        
-        img_bytes = get_bale_file_bytes(file_id)
-        if not img_bytes:
-            send_message(chat_id, "❌ دریافت تصویر نسخه از سرور بله ناموفق بود. لطفاً عکس را با حجم کمتر یا به صورت فایل ارسال فرمایید.")
+        send_bale_msg(chat_id, "🔍 تصویر دریافت شد. در حال استخراج داروها و اعمال ضوابط بیمه البرز...")
+
+        img_data = get_file_content(file_id)
+        if not img_data:
+            send_bale_msg(chat_id, "❌ خطا در دانلود تصویر نسخه از سرور بله. لطفاً عکس را دوباره با زاویه مناسب و حجم کمتر ارسال کنید.")
             return
 
-        doc_info = f"پزشک عمومی" if doc_type == "general" else f"پزشک متخصص ({specialty})"
+        doc_title = "پزشک عمومی" if doc_type == "general" else f"متخصص ({specialty})"
 
         prompt = f"""
-تو ممیز و کارشناس ارشد اسناد دارویی بیمه البرز هستی.
-اطلاعات ثبت‌شده توسط متصدی داروخانه:
-- نام داروخانه: {pharmacy}
-- سازمان طرف قرارداد: {org}
-- وضعیت پزشک تجویزکننده: {doc_info}
+نقش شما: ممیز ارشد اسناد دارویی بیمه البرز.
+اطلاعات متصدی داروخانه:
+- داروخانه: {pharmacy}
+- سازمان بیمه‌شده: {org}
+- وضعیت پزشک تجویزکننده: {doc_title}
 
-لطفاً تصویر پیش‌فاکتور/نسخه را با دقت بالا تحلیل کرده و گزارش زیر را ارائه ده:
-۱. استخراج اقلام: نام تک‌به‌تک داروها، دوز، تعداد و مبلغ هر قلم را شماره‌گذاری و فهرست کن.
-۲. انطباق تخصص: بررسی کن آیا داروها با تخصص پزشک ({doc_info}) همخوانی دارند یا خیر.
-۳. تطبیق با ضوابط سازمان '{org}' و بیمه البرز: بررسی سقف پرداخت مکمل‌ها، ویتامین‌ها، داروهای خارجی/برند، و حق فنی.
-۴. تعیین وضعیت برای هر قلم: [قابل پرداخت]، [غیرقابل پرداخت]، یا [کسورات احتمالی / نیاز به تایید].
-۵. جمع‌بندی مالی: جمع کل سهم سازمان و بیمار.
+دستورات صریح ارزیابی:
+۱. بازخوانی و استخراج اقلام:
+تمام اقلام، داروها و خدمات ثبت‌شده در فاکتور را به ترتیب شماره‌گذاری کن و بنویس (نام دارو یا خدمت، تعداد، دوز، مبلغ کل و سهم بیمه‌شده).
 
-پاسخ را با لحن اداری، ساختاریافته و کاملاً خوانا ارسال کن.
+۲. ارزیابی انطباق با تخصص پزشک ({doc_title}):
+آیا این داروها در محدوده صلاحیت قانونی تجویز این رده پزشک هستند؟ داروهایی که نیاز به تایید متخصص دیگر دارند را مشخص کن.
+
+۳. ارزیابی تطبیقی با شیوه‌نامه سازمان '{org}' و آیین‌نامه بیمه البرز:
+- مکمل‌ها و ویتامین‌ها: آیا قابل پرداخت هستند؟ سقف دارند یا نیاز به تاییدیه دارند؟
+- داروهای تخصصی/برند/خارجی: ضوابط پرداخت سهم سازمان چیست؟
+- خدمات فنی و لوازم جانبی (سرنگ، تعرفه خدمات دارویی): مجاز یا غیرمجاز بودن را تعیین کن.
+
+۴. نتیجه‌گیری برای هر قلم:
+روبروی هر قلم به صراحت بنویس: [قابل پرداخت] یا [غیرقابل پرداخت با دلیل] یا [مشروط به تایید پزشک معتمد].
+
+۵. خلاصه نهایی:
+جمع مبالغ قابل تایید سهم سازمان و سهم بیمار را درج کن.
+
+نکته مهم: خروجی به زبان فارسی سلیس، تمیز و ساختاریافته برای متصدی داروخانه باشد.
 """
 
         model = genai.GenerativeModel("gemini-1.5-flash")
-        image_part = {"mime_type": "image/jpeg", "data": img_bytes}
+        contents = [
+            prompt,
+            {"mime_type": "image/jpeg", "data": img_data}
+        ]
 
-        response = model.generate_content([prompt, image_part])
+        logger.info("Calling Gemini API...")
+        response = model.generate_content(contents)
 
         if response and response.text:
-            header = f"📋 گزارش کارشناسی اسناد دارویی بیمه البرز\n🏥 داروخانه: {pharmacy}\n🏢 سازمان: {org}\n🩺 پزشک: {doc_info}\n━━━━━━━━━━━━━━━━━━\n"
-            send_message(chat_id, header + response.text)
+            header = (
+                f"📋 نتیجه بررسی کارشناسی نسخه\n"
+                f"🏥 داروخانه: {pharmacy}\n"
+                f"🏢 سازمان: {org}\n"
+                f"🩺 پزشک: {doc_title}\n"
+                f"────────────────────\n"
+            )
+            send_bale_msg(chat_id, header + response.text)
         else:
-            send_message(chat_id, "⚠️ متن یا ارقامی از تصویر خوانده نشد. لطفاً عکس واضح‌تر و بدون زاویه ارسال فرمایید.")
+            send_bale_msg(chat_id, "⚠️ هوش مصنوعی نتوانست متن یا اقلامی از این تصویر استخراج کند. لطفاً تصویر باکیفیت‌تری ارسال فرمایید.")
 
     except Exception as e:
-        logger.error(f"Analysis error: {e}")
-        send_message(chat_id, f"❌ خطای پردازش هوش مصنوعی: {str(e)}")
+        logger.error(f"Error in process_prescription_ai: {e}")
+        send_bale_msg(chat_id, f"❌ بروز خطا در تحلیل نسخه: {str(e)}")
 
     finally:
         user_states[chat_id] = {"step": "WAIT_PHARMACY"}
-        send_message(chat_id, "✅ بررسی این پرونده به پایان رسید.\n🔄 برای بررسی نسخه بعدی، دستور /start را ارسال کنید.")
+        send_bale_msg(chat_id, "✅ پرونده بسته شد.\n🔄 برای بررسی نسخه بعدی، /start را بفرستید.")
 
 @app.route("/", methods=["GET"])
-def index():
-    return "Pharma Assessment Bot is Online.", 200
+def home():
+    return "Pharma Assessment Bot is Active.", 200
 
 @app.route(f"/webhook/{TOKEN}", methods=["POST"])
 @app.route("/webhook", methods=["POST"])
@@ -130,99 +163,124 @@ def webhook():
         if not chat_id:
             return jsonify({"status": "no chat_id"}), 200
 
-        # دستور شروع
+        # فرمان شروع یا ریست
         if text in ["/start", "شروع", "restart"]:
             user_states[chat_id] = {"step": "WAIT_PHARMACY"}
-            send_message(
+            send_bale_msg(
                 chat_id,
                 "سلام متصدی محترم داروخانه؛\n"
-                "به سامانه بررسی هوشمند اسناد دارویی بیمه البرز خوش آمدید.\n\n"
-                "📌 مرحله ۱ از ۵: لطفاً «نام داروخانه» را وارد فرمایید:"
+                "به سامانه ممیزی و ارزیابی هوشمند اسناد دارویی بیمه البرز خوش آمدید.\n\n"
+                "📌 مرحله ۱ از ۵: لطفاً «نام کامل داروخانه» را وارد نمایید (حداقل ۳ حرف):"
             )
             return jsonify({"status": "ok"}), 200
 
         if chat_id not in user_states:
             user_states[chat_id] = {"step": "WAIT_PHARMACY"}
-            send_message(
+            send_bale_msg(
                 chat_id,
-                "سلام متصدی محترم داروخانه؛ لطفاً جهت شروع، «نام داروخانه» را وارد نمایید:"
+                "سلام متصدی محترم داروخانه؛ جهت ارزیابی نسخه، لطفاً «نام داروخانه» را وارد نمایید:"
             )
             return jsonify({"status": "ok"}), 200
 
         state = user_states[chat_id]
         step = state.get("step")
 
-        # گام ۱: نام داروخانه
+        # ۱. نام داروخانه (اعتبارسنجی حداقل ۳ حرف)
         if step == "WAIT_PHARMACY":
-            if not text:
-                send_message(chat_id, "⚠️ لطفاً نام داروخانه را تایپ کنید:")
+            if len(text) < 3:
+                send_bale_msg(chat_id, "⚠️ نام داروخانه نمی‌تواند تک‌حرفی باشد. لطفاً نام دقیق داروخانه را تایپ کنید:")
                 return jsonify({"status": "ok"}), 200
+
             state["pharmacy"] = text
             state["step"] = "WAIT_ORG"
-            send_message(
-                chat_id,
+
+            org_menu = (
                 f"✅ داروخانه: {text}\n\n"
-                "📌 مرحله ۲ از ۵: نام سازمان بیمه‌شده / ارگان متبوع را وارد فرمایید\n"
-                "(مثال: بانک توسعه تعاون، جهاد کشاورزی، شرکت نفتکش و...):"
+                "📌 مرحله ۲ از ۵: لطفاً سازمان بیمه‌شده / ارگان طرف قرارداد را مشخص نمایید:\n\n"
+                "۱. بانک توسعه تعاون\n"
+                "۲. جهاد کشاورزی\n"
+                "۳. شرکت ملی نفتکش ایران\n"
+                "۴. مادر تخصصی بازرگانی دولتی\n"
+                "۵. گروه مپنا\n"
+                "۶. بنیاد مسکن انقلاب اسلامی\n"
+                "۷. سازمان توسعه و نوسازی معادن (ایمیدرو)\n"
+                "۸. سازمان فضایی / فناوری اطلاعات\n"
+                "۹. سایر سازمان‌های طرف قرارداد بیمه البرز\n\n"
+                "👈 لطفاً شماره گزینه (۱ تا ۹) یا نام سازمان را وارد نمایید:"
             )
+            send_bale_msg(chat_id, org_menu)
             return jsonify({"status": "ok"}), 200
 
-        # گام ۲: نام سازمان
+        # ۲. نام سازمان (اعتبارسنجی دقیق)
         elif step == "WAIT_ORG":
-            if not text:
-                send_message(chat_id, "⚠️ لطفاً نام سازمان را وارد فرمایید:")
+            selected_org = None
+            if text in VALID_ORGS:
+                selected_org = VALID_ORGS[text]
+            elif len(text) >= 3:
+                # جستجو در نام‌ها یا ثبت مستقیم
+                for k, v in VALID_ORGS.items():
+                    if text in v or v in text:
+                        selected_org = v
+                        break
+                if not selected_org:
+                    selected_org = text
+
+            if not selected_org:
+                send_bale_msg(chat_id, "⚠️ نام سازمان وارد شده معتبر نیست. لطفاً یکی از گزینه‌ها (مثلاً عدد 1 تا 9 یا نام کامل ارگان) را بفرستید:")
                 return jsonify({"status": "ok"}), 200
-            state["org"] = text
+
+            state["org"] = selected_org
             state["step"] = "WAIT_DOC_TYPE"
-            send_message(
+            send_bale_msg(
                 chat_id,
-                f"✅ سازمان: {text}\n\n"
+                f"✅ سازمان ثبت شد: {selected_org}\n\n"
                 "📌 مرحله ۳ از ۵: نوع پزشک تجویزکننده را مشخص کنید:\n"
                 "۱. عمومی\n"
                 "۲. متخصص\n\n"
-                "لطفاً عدد (1 یا 2) یا کلمه «عمومی» / «متخصص» را بفرستید:"
+                "لطفاً عدد (1 یا 2) یا کلمه «عمومی» / «متخصص» را ارسال فرمایید:"
             )
             return jsonify({"status": "ok"}), 200
 
-        # گام ۳: رده پزشک
+        # ۳. نوع پزشک
         elif step == "WAIT_DOC_TYPE":
             if text in ["1", "عمومی", "پزشک عمومی"]:
                 state["doc_type"] = "general"
-                state["specialty"] = "عمومی"
+                state["specialty"] = "پزشک عمومی"
                 state["step"] = "WAIT_IMAGE"
-                send_message(
+                send_bale_msg(
                     chat_id,
-                    "✅ رده پزشک: عمومی\n\n"
-                    "📌 مرحله نهایی: اکنون تصویر واضح نسخه یا پیش‌فاکتور را ارسال فرمایید:"
+                    "✅ رده پزشک: پزشک عمومی\n\n"
+                    "📌 مرحله نهایی: لطفاً تصویر واضح، خوانا و اسکن‌شده نسخه یا پیش‌فاکتور را ارسال فرمایید:"
                 )
             elif text in ["2", "متخصص", "پزشک متخصص"]:
                 state["doc_type"] = "specialist"
-                state["step"] = "WAIT_SPECIALTY_NAME"
-                send_message(
+                state["step"] = "WAIT_SPEC"
+                send_bale_msg(
                     chat_id,
                     "✅ رده پزشک: متخصص\n\n"
-                    "📌 مرحله ۴ از ۵: لطفاً عنوان دقیق «تخصص پزشک» را بنویسید\n"
-                    "(مثال: مغز و اعصاب، قلب و عروق، داخلی، ارتوپد و...):"
+                    "📌 مرحله ۴ از ۵: عنوان دقیق تخصص پزشک چیست؟\n"
+                    "(مثال: مغز و اعصاب، داخلی، قلب و عروق، ارتوپد، پوست و مو و...):"
                 )
             else:
-                send_message(chat_id, "⚠️ لطفاً مشخص کنید پزشک عمومی است یا متخصص (ارسال عدد 1 یا 2):")
+                send_bale_msg(chat_id, "⚠️ لطفاً تنها یکی از گزینه‌ها را انتخاب کنید: ۱ (عمومی) یا ۲ (متخصص)")
             return jsonify({"status": "ok"}), 200
 
-        # گام ۴: تخصص پزشک
-        elif step == "WAIT_SPECIALTY_NAME":
-            if not text:
-                send_message(chat_id, "⚠️ لطفاً عنوان تخصص را وارد فرمایید:")
+        # ۴. عنوان تخصص پزشک
+        elif step == "WAIT_SPEC":
+            if len(text) < 3:
+                send_bale_msg(chat_id, "⚠️ لطفاً عنوان تخصص را به طور کامل بنویسید (مثلاً: متخصص ارتوپد):")
                 return jsonify({"status": "ok"}), 200
+
             state["specialty"] = text
             state["step"] = "WAIT_IMAGE"
-            send_message(
+            send_bale_msg(
                 chat_id,
                 f"✅ تخصص ثبت شد: {text}\n\n"
-                "📌 مرحله نهایی: اکنون تصویر واضح نسخه یا پیش‌فاکتور را ارسال فرمایید:"
+                "📌 مرحله نهایی: لطفاً تصویر واضح، خوانا و اسکن‌شده نسخه یا پیش‌فاکتور را ارسال فرمایید:"
             )
             return jsonify({"status": "ok"}), 200
 
-        # گام نهایی: تصویر
+        # ۵. دریافت تصویر نسخه
         elif step == "WAIT_IMAGE":
             file_id = None
             if photo:
@@ -231,19 +289,19 @@ def webhook():
                 file_id = doc.get("file_id")
 
             if not file_id:
-                send_message(chat_id, "⚠️ لطفاً فایل را حتماً به صورت عکس یا تصویر نسخه ارسال کنید.")
+                send_bale_msg(chat_id, "⚠️ لطفاً سند را صرفاً به عنوان تصویر (عکس یا پیش‌فاکتور) ارسال فرمایید.")
                 return jsonify({"status": "ok"}), 200
 
-            # اجرا در Thread مستقل
+            # ارسال به Thread مجزا جهت جلوگیری از تایم‌اوت وب‌هوک
             t = threading.Thread(
-                target=analyze_prescription,
+                target=process_prescription_ai,
                 args=(
                     chat_id,
                     file_id,
-                    state.get("pharmacy", "نامشخص"),
-                    state.get("org", "عمومی"),
-                    state.get("doc_type", "general"),
-                    state.get("specialty", "عمومی")
+                    state.get("pharmacy"),
+                    state.get("org"),
+                    state.get("doc_type"),
+                    state.get("specialty")
                 )
             )
             t.start()
@@ -252,7 +310,7 @@ def webhook():
         return jsonify({"status": "ok"}), 200
 
     except Exception as e:
-        logger.error(f"Global webhook error: {e}")
+        logger.error(f"Global webhook exception: {e}")
         return jsonify({"status": "error"}), 200
 
 if __name__ == "__main__":
